@@ -1,0 +1,8 @@
+streamlit
+duckdb
+plotly
+pandas
+polars
+great-expectations
+reportlab
+openpyxl

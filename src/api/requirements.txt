@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+duckdb
+sqlglot
+sse-starlette
+python-multipart

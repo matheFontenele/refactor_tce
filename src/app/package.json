@@ -1,0 +1,16 @@
+{
+  "name": "refatoracao_tce-frontend",
+  "version": "1.0.0",
+  "description": "SQL Studio Frontend",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "next dev --experimental-prefers-node-loader",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^14",
+    "react": "^18",
+    "react-dom": "^18"
+  }
+}

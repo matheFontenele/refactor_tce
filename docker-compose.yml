@@ -1,0 +1,95 @@
+version: "3.8"
+
+services:
+  # FastAPI backend for SQL Studio and analytics
+  api:
+    build: 
+      context: ./src/api
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - DUCKDB_PATH=/data/tce_analysis.duckdb
+      - MEMORY_LIMIT=1536
+    volumes:
+      - data:/data:ro
+    depends_on:
+      - parquet-db
+
+  # DuckDB/Parquet database (read-only for FastAPI)
+  parquet-db:
+    image: postgres:16
+    container_name: parquet-db
+    ports:
+      - "5433:5433"
+    environment:
+      - POSTGRES_USER=readonly
+      - POSTGRES_PASSWORD=readonly
+      - POSTGRES_DB=tce_analysis
+    volumes:
+      - parquet_data:/var/lib/postgresql/data:rw
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Airflow scheduler for monthly extraction
+  airflow:
+    image: apache/airflow:2.9.0-base
+    container_name: airflow
+    environment:
+      - AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+    volumes:
+      - airflow_home:/opt/airflow
+    command: ["airflow", "Scheduler"]
+    depends_on:
+      - parquet-db
+
+  # Streamlit frontend (temporarily during migration)
+  streamlit:
+    build: 
+      context: ./src/app
+      dockerfile: Dockerfile.streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      - DUCKDB_PATH=/data/tce_analysis.duckdb
+    volumes:
+      - data:/data:ro
+    depends_on:
+      - airflow
+
+  # Ollama LLM for AI Assistant
+  ollama:
+    image: ghcr.io/ollama/ollama:latest
+    container_name: tce-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama:rw
+
+  # Next.js frontend (new architecture)
+  frontend:
+    build:
+      context: ./src/app
+      dockerfile: Dockerfile.nextjs
+    ports:
+      - "3000:3000"
+    environment:
+      - API_URL=http://api:8000
+      - DUCKDB_PATH=/data/tce_analysis.duckdb
+    depends_on:
+      - api
+
+volumes:
+  data:
+    driver: local
+  parquet_data:
+    driver: local
+  airflow_home:
+    driver: local
+  ollama_models:
+    driver: local

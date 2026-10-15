@@ -1,0 +1,35 @@
+{
+  "name": "refatoracao_tce",
+  "version": "1.0.0",
+  "description": "Plataforma de Auditoria Fiscal TCE-CE - SQL Studio",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev --experimental-prefers-node-loader",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "echo 'No tests yet'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matheFontenele/refactor_tce.git"
+  },
+  "keywords": ["tce", "auditoria", "sql", "monaco", "duckdb", "fastapi"],
+  "author": "Matheus Fontenele",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/matheFontenele/refactor_tce/issues"
+  },
+  "homepage": "https://github.com/matheFontenele/refactor_tce#readme",
+  "dependencies": {
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5"
+  }
+}

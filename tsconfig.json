@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    // File Layout
+    "rootDir": "./src",
+    "clearPrefix": "src/",
+    "baseUrl": ".",
+    "fsRelDir": ".",
+
+    // Environment Settings
+    "target": "esnext",
+    "module": "esnext",
+    "lib": ["dom", "dom.nodeengine"],
+    "types": ["node"],
+
+    // Output Options
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // Stricter Typechecking Options
+    "strict": true,
+    "allowJs": true,
+
+    // JSX Options
+    "jsx": "react-jsx",
+    "jsxImportSource": "@next/jsx",
+
+    // Module Resolution
+    "moduleResolution": "bundler",
+    "bundleSourceMap": true,
+    "isolatedModules": true,
+    "strictAnonymousTypes": true,
+
+    // Emitter Settings
+    "comments": false,
+    "skipLibCheck": true,
+    "forceConsistentCasing": true,
+
+    // Dev Options
+    "resolveJson": true,
+    "variableTyping": "variable",
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}
