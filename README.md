@@ -67,6 +67,28 @@ Detalhes do dataset real:
 - ordem de grandeza: ~1M notas de empenho em 2025 em 2,2k arquivos → ~3s de varredura
   (small-file problem — material de estudo)
 
+### Híbrido local-first — fetch sob demanda da API TCE (Spec 2.1)
+
+Se o recorte pedido (categoria × ano × município) não existe no data lake local, a
+Pesquisa baixa **só esse recorte** da API do TCE, valida e grava em `data/cache/`
+(gravável; o dataset real continua read-only). Não precisa rodar backfill manual —
+a primeira consulta a um município/ano novo preenche o cache.
+
+- **Cache hit** → leitura local pura (sem rede)
+- **Cache miss** → baixa os recortes faltantes (paginação + rate-limit + retry,
+  port do `extraction.py` original), grava atômico e serve
+- **TCE fora do ar** → serve o que existe local; a resposta traz `fetch_error`
+- **Mês sem dado em ano fechado** → marcador `.empty` (cache negativo; não re-consulta)
+- **Validação pós-escrita com DuckDB** (o check antigo via pyarrow aceitava parquet
+  0-coluna — origem dos arquivos corrompidos do dataset real)
+
+Variáveis: `CACHE_PARQUET_DIR`, `TCE_FETCH_ENABLED`, `TCE_FETCH_BUDGET_SECONDS`
+(orçamento por consulta), `TCE_FETCH_MAX_RECORTES`, `TCE_HTTP_TIMEOUT`, `TCE_HTTP_RETRIES`.
+
+Resposta da busca: `source` (`parquet`/`seed`), `fetched` (recortes baixados agora),
+`fetch_error` (TCE indisponível) e `fetch_pending` (recortes restantes). O fetch só
+roda com município específico — nunca em "Todos".
+
 ---
 
 ## Testes rápidos

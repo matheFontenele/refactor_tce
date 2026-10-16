@@ -63,6 +63,10 @@ interface SearchResults {
   rows: SearchRow[];
   /** "parquet" = dataset real do TCE; "seed" = amostra local */
   source?: string;
+  /** Recortes baixados da API do TCE nesta consulta (Spec 2.1) */
+  fetched?: string[];
+  fetch_error?: string | null;
+  fetch_pending?: number;
 }
 
 const brl = (n: number) =>
@@ -582,6 +586,36 @@ export default function Search() {
                     </span>
                   </>
                 )}
+                {results.fetched && results.fetched.length > 0 && (
+                  <>
+                    {" • "}
+                    <span className="text-sky-400/80">
+                      {results.fetched.length} recorte
+                      {results.fetched.length > 1 ? "s" : ""} baixado
+                      {results.fetched.length > 1 ? "s" : ""} da API do TCE
+                    </span>
+                  </>
+                )}
+                {results.fetch_error && (
+                  <>
+                    {" • "}
+                    <span className="text-amber-500/80">
+                      API do TCE indisponível — servindo dados locais
+                    </span>
+                  </>
+                )}
+                {!results.fetch_error &&
+                  (results.fetch_pending || 0) > 0 && (
+                    <>
+                      {" • "}
+                      <span className="text-slate-500">
+                        {results.fetch_pending} recorte
+                        {(results.fetch_pending || 0) > 1 ? "s" : ""} pendente
+                        {(results.fetch_pending || 0) > 1 ? "s" : ""} — repita a
+                        busca para continuar
+                      </span>
+                    </>
+                  )}
               </p>
             </div>
             <button

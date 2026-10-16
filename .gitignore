@@ -14,6 +14,8 @@ next-env.d.ts
 data/*.duckdb
 data/*.json
 data/*.parquet
+data/cache/*
+!data/cache/.gitkeep
 
 # Env
 .env

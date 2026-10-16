@@ -9,6 +9,11 @@ import sqlglot
 import time as _time
 from typing import Optional, List, Dict, Any
 
+try:  # pyarrow/requests existem na imagem Docker; dev local cai no modo parquet/seed
+    import tce_client as _tce
+except Exception:  # pragma: no cover
+    _tce = None
+
 app = FastAPI(title="SQL Studio API", version="0.1.0")
 
 # CORS — frontend Next.js (3001) chama a API (9001) cross-origin
@@ -84,6 +89,14 @@ MUNICIPIOS_FILE = os.environ.get("MUNICIPIOS_FILE", os.path.join(_ROOT, "municip
 # Parquets reais do TCE (opcional; montado read-only em /parquet no Docker).
 # Quando presente, a Pesquisa lê parquet lazy (zero-copy) em vez do seed.
 PARQUET_DIR = os.environ.get("PARQUET_DIR", "")
+
+# Data lake local gravável: recortes baixados sob demanda da API TCE (Spec 2.1).
+CACHE_PARQUET_DIR = os.environ.get("CACHE_PARQUET_DIR", os.path.join(_ROOT, "data", "cache"))
+
+# Híbrido local-first: a API do TCE só é chamada para recortes ausentes no cache.
+TCE_FETCH_ENABLED = os.environ.get("TCE_FETCH_ENABLED", "1") != "0"
+TCE_FETCH_BUDGET_SECONDS = float(os.environ.get("TCE_FETCH_BUDGET_SECONDS", "60"))
+TCE_FETCH_MAX_RECORTES = int(os.environ.get("TCE_FETCH_MAX_RECORTES", "12"))
 
 # Arquivos parquet corrompidos detectados em tempo de execução (blocklist em memória)
 _BAD_PARQUET_FILES: set = set()
@@ -512,6 +525,11 @@ def _serialize_row(row):
     return out
 
 
+def _parquet_dirs():
+    """Data lake local: dataset real (ro) + cache gravável de recortes sob demanda."""
+    return [d for d in (PARQUET_DIR, CACHE_PARQUET_DIR) if d and os.path.isdir(d)]
+
+
 def _parquet_files(prefixo: str, year_from: int, year_to: int, municipality: str):
     """Lista arquivos parquet com pruning por nome (ano/município).
 
@@ -520,15 +538,146 @@ def _parquet_files(prefixo: str, year_from: int, year_to: int, municipality: str
     Arquivos corrompidos já detectados são excluídos.
     """
     files = set()
-    for ano in range(year_from, year_to + 1):
-        if municipality and municipality != "all":
-            code = str(municipality).zfill(3)
-            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}_*_{code}.parquet")))
-            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}_{code}.parquet")))
-        else:
-            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}_*.parquet")))
-            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}.parquet")))
+    for base in _parquet_dirs():
+        for ano in range(year_from, year_to + 1):
+            if municipality and municipality != "all":
+                code = str(municipality).zfill(3)
+                files.update(_glob.glob(os.path.join(base, f"{prefixo}_{ano}_*_{code}.parquet")))
+                files.update(_glob.glob(os.path.join(base, f"{prefixo}_{ano}_{code}.parquet")))
+            else:
+                files.update(_glob.glob(os.path.join(base, f"{prefixo}_{ano}_*.parquet")))
+                files.update(_glob.glob(os.path.join(base, f"{prefixo}_{ano}.parquet")))
     return sorted(f for f in files if f not in _BAD_PARQUET_FILES)
+
+
+def _prefix_has_files(prefixo: str) -> bool:
+    """Existe qualquer arquivo do prefixo no data lake local (o seed é último recurso)?"""
+    return any(
+        _glob.glob(os.path.join(base, f"{prefixo}_*.parquet"))
+        for base in _parquet_dirs()
+    )
+
+
+def _recorte_filename(prefixo: str, ano: int, mes, code: str) -> str:
+    if mes is None:
+        return f"{prefixo}_{ano}_{code}.parquet"
+    return f"{prefixo}_{ano}_{mes:02d}_{code}.parquet"
+
+
+def _recorte_presente(prefixo: str, ano: int, mes, code: str) -> bool:
+    """Arquivo baixado ou marcador de cache negativo (.empty) já existem?"""
+    nome = _recorte_filename(prefixo, ano, mes, code)
+    for base in _parquet_dirs():
+        if os.path.exists(os.path.join(base, nome)) or os.path.exists(
+            os.path.join(base, nome + ".empty")
+        ):
+            return True
+    return False
+
+
+def _recortes_do_intervalo(prefixo: str, freq: str, anos, code: str):
+    """Recortes (ano, mes) do intervalo pedido. Anual não tem mês; ano corrente: até o mês atual."""
+    hoje = _dt.date.today()
+    for ano in anos:
+        if freq == "anual":
+            yield ano, None
+        else:
+            mes_max = 12 if ano < hoje.year else hoje.month
+            for mes in range(1, mes_max + 1):
+                yield ano, mes
+
+
+def _resolve_source(cat: dict, prefixo: str, req: "SearchRequest", cfg: dict):
+    """Resolve a fonte local e baixa da API TCE apenas os recortes ausentes.
+
+    Spec 2.1 (local-first): cache hit serve na hora; miss baixa só o recorte
+    faltante. TCE fora do ar → serve o que existe local; nunca falha por rede.
+    Retorna (file_list | None, fetched, fetch_error, fetch_pending).
+    """
+    file_list = (
+        _parquet_files(prefixo, req.year_from, req.year_to, req.municipality)
+        if _prefix_has_files(prefixo)
+        else None
+    )
+
+    fetched, fetch_error, pending = [], None, 0
+    munis = {
+        m.get("codigo_municipio"): m.get("nome_municipio")
+        for m in cfg["municipios"].get("elements", [])
+    }
+    pode_baixar = (
+        TCE_FETCH_ENABLED
+        and _tce is not None
+        and req.municipality
+        and req.municipality != "all"
+        and req.municipality in munis  # código válido (evita fetch de código inexistente)
+        and cat.get("endpoint")
+        and (cat.get("parametros_obrigatorios") or [])
+    )
+    if not pode_baixar:
+        return file_list, fetched, fetch_error, pending
+
+    freq = str(cat.get("frequencia") or "mensal").lower()
+    code = str(req.municipality).zfill(3)
+    anos = list(range(req.year_from, req.year_to + 1))
+    faltantes = [
+        (a, m)
+        for a, m in _recortes_do_intervalo(prefixo, freq, anos, code)
+        if not _recorte_presente(prefixo, a, m, code)
+    ]
+
+    if faltantes:
+        try:
+            os.makedirs(CACHE_PARQUET_DIR, exist_ok=True)
+            gravavel = os.access(CACHE_PARQUET_DIR, os.W_OK)
+        except OSError:
+            gravavel = False
+        if not gravavel:
+            fetch_error = f"cache local não gravável: {CACHE_PARQUET_DIR}"
+        else:
+            nome_mun = munis.get(req.municipality) or f"COD {code}"
+            deadline = _time.monotonic() + TCE_FETCH_BUDGET_SECONDS
+            for i, (ano, mes) in enumerate(faltantes):
+                if i >= TCE_FETCH_MAX_RECORTES or _time.monotonic() > deadline:
+                    pending = len(faltantes) - i
+                    break
+                nome_arquivo = _recorte_filename(prefixo, ano, mes, code)
+                caminho = os.path.join(CACHE_PARQUET_DIR, nome_arquivo)
+                try:
+                    rows, erro = _tce.baixar_recorte(
+                        cat["endpoint"],
+                        cat["parametros_obrigatorios"],
+                        ano,
+                        code,
+                        mes,
+                        nome_mun,
+                        deadline,
+                    )
+                except Exception as e:  # nunca derruba a busca por erro de rede
+                    rows, erro = [], f"{type(e).__name__}: {e}"
+                if erro and not rows:
+                    fetch_error = erro
+                    pending = len(faltantes) - i
+                    break
+                try:
+                    if _tce.salvar_recorte(rows, caminho, ano) == "BAIXADO":
+                        fetched.append(nome_arquivo)
+                except Exception as e:
+                    fetch_error = f"falha ao gravar {nome_arquivo}: {e}"
+                    break
+
+    # Re-resolve a fonte com o que acabou de ser baixado/marcado
+    file_list = (
+        _parquet_files(prefixo, req.year_from, req.year_to, req.municipality)
+        if _prefix_has_files(prefixo)
+        else None
+    )
+    if file_list is None and any(
+        _recorte_presente(prefixo, a, m, code)
+        for a, m in _recortes_do_intervalo(prefixo, freq, anos, code)
+    ):
+        file_list = []  # só marcadores de vazio → resposta vazia legítima (não cai no seed)
+    return file_list, fetched, fetch_error, pending
 
 
 def _read_parquet_sql(files) -> str:
@@ -563,13 +712,13 @@ def search(req: SearchRequest):
 
     conn = get_db()
 
-    # ---------- Fonte: parquet real (lazy, zero-copy) ou tabela seed ----------
+    # ---------- Fonte: data lake local + fetch sob demanda da API (Spec 2.1) ----------
+    # Local-first: só chama o TCE para recortes ausentes no data lake local.
     from_sql = f'"{table}"'
     source = "seed"
-    file_list = None
-    if PARQUET_DIR and os.path.isdir(PARQUET_DIR):
-        if _glob.glob(os.path.join(PARQUET_DIR, f"{table}_*.parquet")):
-            file_list = _parquet_files(table, req.year_from, req.year_to, req.municipality)
+    file_list, fetched_now, fetch_error, fetch_pending = _resolve_source(
+        cat, table, req, cfg
+    )
 
     if file_list is not None:
         source = "parquet"
@@ -585,6 +734,9 @@ def search(req: SearchRequest):
                     "columns": [],
                     "rows": [],
                     "source": source,
+                    "fetched": fetched_now,
+                    "fetch_error": fetch_error,
+                    "fetch_pending": fetch_pending,
                 }
             from_sql = _read_parquet_sql(file_list)
             try:
@@ -621,34 +773,41 @@ def search(req: SearchRequest):
 
     where, params = [], []
 
-    # 1. Período — cobre os dois encodings: seed (2025) e real TCE (202500 = ano*100)
-    where.append(
-        "(exercicio_orcamento BETWEEN ? AND ?"
-        " OR exercicio_orcamento BETWEEN ? AND ?)"
-    )
-    params += [
-        req.year_from,
-        req.year_to,
-        req.year_from * 100,
-        req.year_to * 100 + 99,
-    ]
+    # 1. Período — a coluna de ano varia por dataset (notas_empenho tem
+    # exercicio_orcamento; veiculos só data_referencia_doc) e com dois encodings:
+    # seed (2025), real TCE (202500 = ano*100) e YYYYMM (202501)
+    if "exercicio_orcamento" in columns:
+        where.append(
+            "(exercicio_orcamento BETWEEN ? AND ?"
+            " OR exercicio_orcamento BETWEEN ? AND ?)"
+        )
+        params += [
+            req.year_from,
+            req.year_to,
+            req.year_from * 100,
+            req.year_to * 100 + 99,
+        ]
+    elif "data_referencia_doc" in columns:
+        where.append("TRY_CAST(data_referencia_doc AS BIGINT) BETWEEN ? AND ?")
+        params += [req.year_from * 100, req.year_to * 100 + 99]
+    # sem coluna de ano → o pruning por nome de arquivo (ano no filename) já limita
 
-    # 2. Município (municipio_referencia no seed; codigo_municipio no parquet real)
+    # 2. Município (codigo_municipio no dado real/cache; municipio_referencia no seed)
     if req.municipality and req.municipality != "all":
-        munis = {
-            m.get("codigo_municipio"): m.get("nome_municipio")
-            for m in cfg["municipios"].get("elements", [])
-        }
-        nome = munis.get(req.municipality)
-        if "municipio_referencia" in columns:
+        if "codigo_municipio" in columns:
+            where.append("LPAD(CAST(codigo_municipio AS VARCHAR), 3, '0') = ?")
+            params.append(str(req.municipality).zfill(3))
+        elif "municipio_referencia" in columns:
+            munis = {
+                m.get("codigo_municipio"): m.get("nome_municipio")
+                for m in cfg["municipios"].get("elements", [])
+            }
+            nome = munis.get(req.municipality)
             if nome:
                 where.append("UPPER(COALESCE(municipio_referencia, '')) = UPPER(?)")
                 params.append(nome)
             else:
                 where.append("1 = 0")  # código inválido → sem resultados
-        elif "codigo_municipio" in columns:
-            where.append("LPAD(CAST(codigo_municipio AS VARCHAR), 3, '0') = ?")
-            params.append(str(req.municipality).zfill(3))
         # sem coluna de município → o pruning por nome de arquivo já limita (como no original)
 
     # 3. Filtros dinâmicos (apenas colunas existentes na tabela)
@@ -708,11 +867,19 @@ def search(req: SearchRequest):
         else "'' AS match_reason"
     )
 
-    order_sql = (
-        "exercicio_orcamento DESC, id ASC"
-        if "id" in columns
-        else "exercicio_orcamento DESC"
-    )
+    # Ordenação: pela coluna de ano existente (schema varia por dataset)
+    if "exercicio_orcamento" in columns:
+        order_col = "exercicio_orcamento"
+    elif "data_referencia_doc" in columns:
+        order_col = "TRY_CAST(data_referencia_doc AS BIGINT)"
+    else:
+        order_col = None
+    if order_col:
+        order_sql = f"{order_col} DESC"
+        if "id" in columns:
+            order_sql += ", id ASC"
+    else:
+        order_sql = "id ASC" if "id" in columns else None
 
     limit = max(1, min(req.limit or 500, 500))
     while True:
@@ -721,10 +888,11 @@ def search(req: SearchRequest):
                 f"SELECT COUNT(*) FROM {from_sql} WHERE {where_sql}", params
             ).fetchone()[0]
 
+            order_clause = f"ORDER BY {order_sql} " if order_sql else ""
             result = conn.execute(
                 f"SELECT *, {match_expr} FROM {from_sql} "
                 f"WHERE {where_sql} "
-                f"ORDER BY {order_sql} "
+                f"{order_clause}"
                 f"LIMIT ?",
                 match_params + params + [limit],
             ).fetchall()
@@ -743,6 +911,9 @@ def search(req: SearchRequest):
                         "columns": [],
                         "rows": [],
                         "source": source,
+                        "fetched": fetched_now,
+                        "fetch_error": fetch_error,
+                        "fetch_pending": fetch_pending,
                     }
                 from_sql = _read_parquet_sql(file_list)
                 continue
@@ -758,6 +929,9 @@ def search(req: SearchRequest):
         "columns": columns + ["match_reason"],
         "rows": rows,
         "source": source,
+        "fetched": fetched_now,
+        "fetch_error": fetch_error,
+        "fetch_pending": fetch_pending,
     }
 
 

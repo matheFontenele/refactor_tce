@@ -13,11 +13,16 @@ services:
       - ENDPOINTS_FILE=/config/endpoints.json
       - MUNICIPIOS_FILE=/config/municipios.json
       - PARQUET_DIR=/parquet
+      - CACHE_PARQUET_DIR=/cache
+      - TCE_FETCH_BUDGET_SECONDS=120
+      - TCE_FETCH_MAX_RECORTES=24
     volumes:
       - ./data:/data:ro
       # Dataset real do TCE (read-only). Defina PARQUET_SOURCE no .env.
       # Default ./data = sem parquets → Pesquisa cai no seed automaticamente.
       - ${PARQUET_SOURCE:-./data}:/parquet:ro
+      # Cache gravável: recortes baixados sob demanda da API TCE (Spec 2.1)
+      - ./data/cache:/cache
       - ./endpoints.json:/config/endpoints.json:ro
       - ./municipios.json:/config/municipios.json:ro
     healthcheck:

@@ -4,3 +4,5 @@ duckdb
 sqlglot
 sse-starlette
 python-multipart
+requests
+pyarrow

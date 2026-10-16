@@ -4,10 +4,10 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn "duckdb>=0.10" sqlglot sse-starlette python-multipart
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy application code
-COPY main.py /app/main.py
+COPY main.py tce_client.py /app/
 
 # NOTE: DuckDB database is mounted as read-only volume at /data/tce_analysis.duckdb
 # The data volume is created and populated outside this container
