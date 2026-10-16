@@ -12,8 +12,12 @@ services:
       - MEMORY_LIMIT=1536
       - ENDPOINTS_FILE=/config/endpoints.json
       - MUNICIPIOS_FILE=/config/municipios.json
+      - PARQUET_DIR=/parquet
     volumes:
       - ./data:/data:ro
+      # Dataset real do TCE (read-only). Defina PARQUET_SOURCE no .env.
+      # Default ./data = sem parquets → Pesquisa cai no seed automaticamente.
+      - ${PARQUET_SOURCE:-./data}:/parquet:ro
       - ./endpoints.json:/config/endpoints.json:ro
       - ./municipios.json:/config/municipios.json:ro
     healthcheck:

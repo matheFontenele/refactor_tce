@@ -61,6 +61,8 @@ interface SearchResults {
   returned: number;
   columns: string[];
   rows: SearchRow[];
+  /** "parquet" = dataset real do TCE; "seed" = amostra local */
+  source?: string;
 }
 
 const brl = (n: number) =>
@@ -564,6 +566,22 @@ export default function Search() {
                 registros.
                 {municipality !== "all" &&
                   ` • Município: ${config.municipalities.find((m) => m.code === municipality)?.name || ""}`}
+                {results.source && (
+                  <>
+                    {" • "}
+                    <span
+                      className={
+                        results.source === "parquet"
+                          ? "text-emerald-500/80"
+                          : "text-slate-500"
+                      }
+                    >
+                      {results.source === "parquet"
+                        ? "dados reais (parquet)"
+                        : "amostra local"}
+                    </span>
+                  </>
+                )}
               </p>
             </div>
             <button

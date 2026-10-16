@@ -81,6 +81,13 @@ _ROOT = os.path.dirname(os.path.dirname(_here))
 ENDPOINTS_FILE = os.environ.get("ENDPOINTS_FILE", os.path.join(_ROOT, "endpoints.json"))
 MUNICIPIOS_FILE = os.environ.get("MUNICIPIOS_FILE", os.path.join(_ROOT, "municipios.json"))
 
+# Parquets reais do TCE (opcional; montado read-only em /parquet no Docker).
+# Quando presente, a Pesquisa lê parquet lazy (zero-copy) em vez do seed.
+PARQUET_DIR = os.environ.get("PARQUET_DIR", "")
+
+# Arquivos parquet corrompidos detectados em tempo de execução (blocklist em memória)
+_BAD_PARQUET_FILES: set = set()
+
 # ----------- Helpers -----------
 
 def get_db():
@@ -429,6 +436,8 @@ def dashboard_stats():
 
 import json as _json
 import datetime as _dt
+import glob as _glob
+import re as _re
 from decimal import Decimal as _Decimal
 
 _search_config_cache: Optional[Dict[str, Any]] = None
@@ -503,6 +512,36 @@ def _serialize_row(row):
     return out
 
 
+def _parquet_files(prefixo: str, year_from: int, year_to: int, municipality: str):
+    """Lista arquivos parquet com pruning por nome (ano/município).
+
+    O dataset real é particionado no nome: {prefixo}_{ano}_{mes}[_{codigo}].parquet
+    — filtrar pelo glob evita abrir os 31k arquivos.
+    Arquivos corrompidos já detectados são excluídos.
+    """
+    files = set()
+    for ano in range(year_from, year_to + 1):
+        if municipality and municipality != "all":
+            code = str(municipality).zfill(3)
+            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}_*_{code}.parquet")))
+            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}_{code}.parquet")))
+        else:
+            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}_*.parquet")))
+            files.update(_glob.glob(os.path.join(PARQUET_DIR, f"{prefixo}_{ano}.parquet")))
+    return sorted(f for f in files if f not in _BAD_PARQUET_FILES)
+
+
+def _read_parquet_sql(files) -> str:
+    quoted = ", ".join("'" + p.replace("'", "''") + "'" for p in files)
+    return f"read_parquet([{quoted}], union_by_name=True)"
+
+
+def _bad_file_from_error(err) -> str:
+    """Extrai o path do arquivo corrompido da mensagem do DuckDB."""
+    m = _re.search(r"Failed to read Parquet file '([^']+)'", str(err))
+    return m.group(1) if m else ""
+
+
 @app.post("/api/search")
 def search(req: SearchRequest):
     """Pesquisa interativa: filtros dinâmicos + busca geral + fornecedor.
@@ -524,20 +563,55 @@ def search(req: SearchRequest):
 
     conn = get_db()
 
-    # Whitelist: a tabela precisa existir no banco
-    existing = {
-        r[0]
-        for r in conn.execute(
-            "SELECT table_name FROM duckdb_tables() WHERE schema_name IN ('main', 'public')"
-        ).fetchall()
-    }
-    if table not in existing:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Tabela '{table}' não existe no banco. Execute: python3 create_db.py",
-        )
+    # ---------- Fonte: parquet real (lazy, zero-copy) ou tabela seed ----------
+    from_sql = f'"{table}"'
+    source = "seed"
+    file_list = None
+    if PARQUET_DIR and os.path.isdir(PARQUET_DIR):
+        if _glob.glob(os.path.join(PARQUET_DIR, f"{table}_*.parquet")):
+            file_list = _parquet_files(table, req.year_from, req.year_to, req.municipality)
 
-    desc = conn.execute(f'DESCRIBE "{table}"').fetchall()
+    if file_list is not None:
+        source = "parquet"
+        # Descobre o schema; arquivos corrompidos entram na blocklist e são excluídos
+        while True:
+            if not file_list:
+                # Nenhum arquivo real para o recorte → resposta vazia de verdade
+                return {
+                    "category": req.category,
+                    "table": table,
+                    "count": 0,
+                    "returned": 0,
+                    "columns": [],
+                    "rows": [],
+                    "source": source,
+                }
+            from_sql = _read_parquet_sql(file_list)
+            try:
+                desc = conn.execute(f"DESCRIBE SELECT * FROM {from_sql}").fetchall()
+                break
+            except Exception as e:
+                bad = _bad_file_from_error(e)
+                if bad and bad in file_list:
+                    _BAD_PARQUET_FILES.add(bad)
+                    file_list = [f for f in file_list if f != bad]
+                    continue
+                raise HTTPException(status_code=400, detail=f"Erro ao ler parquet: {e}")
+    else:
+        # Whitelist: a tabela seed precisa existir no banco
+        existing = {
+            r[0]
+            for r in conn.execute(
+                "SELECT table_name FROM duckdb_tables() WHERE schema_name IN ('main', 'public')"
+            ).fetchall()
+        }
+        if table not in existing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tabela '{table}' não existe no banco. Execute: python3 create_db.py",
+            )
+        desc = conn.execute(f"DESCRIBE SELECT * FROM {from_sql}").fetchall()
+
     columns = [d[0] for d in desc]
     col_types = {d[0]: str(d[1]).upper() for d in desc}
     text_cols = [
@@ -547,22 +621,35 @@ def search(req: SearchRequest):
 
     where, params = [], []
 
-    # 1. Período (sempre aplicado — coluna base)
-    where.append("exercicio_orcamento BETWEEN ? AND ?")
-    params += [req.year_from, req.year_to]
+    # 1. Período — cobre os dois encodings: seed (2025) e real TCE (202500 = ano*100)
+    where.append(
+        "(exercicio_orcamento BETWEEN ? AND ?"
+        " OR exercicio_orcamento BETWEEN ? AND ?)"
+    )
+    params += [
+        req.year_from,
+        req.year_to,
+        req.year_from * 100,
+        req.year_to * 100 + 99,
+    ]
 
-    # 2. Município (codigo → nome)
+    # 2. Município (municipio_referencia no seed; codigo_municipio no parquet real)
     if req.municipality and req.municipality != "all":
         munis = {
             m.get("codigo_municipio"): m.get("nome_municipio")
             for m in cfg["municipios"].get("elements", [])
         }
         nome = munis.get(req.municipality)
-        if nome:
-            where.append("UPPER(COALESCE(municipio_referencia, '')) = UPPER(?)")
-            params.append(nome)
-        else:
-            where.append("1 = 0")  # código inválido → sem resultados
+        if "municipio_referencia" in columns:
+            if nome:
+                where.append("UPPER(COALESCE(municipio_referencia, '')) = UPPER(?)")
+                params.append(nome)
+            else:
+                where.append("1 = 0")  # código inválido → sem resultados
+        elif "codigo_municipio" in columns:
+            where.append("LPAD(CAST(codigo_municipio AS VARCHAR), 3, '0') = ?")
+            params.append(str(req.municipality).zfill(3))
+        # sem coluna de município → o pruning por nome de arquivo já limita (como no original)
 
     # 3. Filtros dinâmicos (apenas colunas existentes na tabela)
     campos_ui = {c.get("id"): c for c in cat.get("campos_ui", [])}
@@ -621,21 +708,45 @@ def search(req: SearchRequest):
         else "'' AS match_reason"
     )
 
-    try:
-        total = conn.execute(
-            f'SELECT COUNT(*) FROM "{table}" WHERE {where_sql}', params
-        ).fetchone()[0]
+    order_sql = (
+        "exercicio_orcamento DESC, id ASC"
+        if "id" in columns
+        else "exercicio_orcamento DESC"
+    )
 
-        limit = max(1, min(req.limit or 500, 500))
-        result = conn.execute(
-            f'SELECT *, {match_expr} FROM "{table}" '
-            f"WHERE {where_sql} "
-            f"ORDER BY exercicio_orcamento DESC, id ASC "
-            f"LIMIT ?",
-            match_params + params + [limit],
-        ).fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro na pesquisa: {e}")
+    limit = max(1, min(req.limit or 500, 500))
+    while True:
+        try:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM {from_sql} WHERE {where_sql}", params
+            ).fetchone()[0]
+
+            result = conn.execute(
+                f"SELECT *, {match_expr} FROM {from_sql} "
+                f"WHERE {where_sql} "
+                f"ORDER BY {order_sql} "
+                f"LIMIT ?",
+                match_params + params + [limit],
+            ).fetchall()
+            break
+        except Exception as e:
+            bad = _bad_file_from_error(e) if source == "parquet" else ""
+            if bad and bad in (file_list or []):
+                _BAD_PARQUET_FILES.add(bad)
+                file_list = [f for f in file_list if f != bad]
+                if not file_list:
+                    return {
+                        "category": req.category,
+                        "table": table,
+                        "count": 0,
+                        "returned": 0,
+                        "columns": [],
+                        "rows": [],
+                        "source": source,
+                    }
+                from_sql = _read_parquet_sql(file_list)
+                continue
+            raise HTTPException(status_code=400, detail=f"Erro na pesquisa: {e}")
 
     rows = [dict(zip(columns + ["match_reason"], _serialize_row(r))) for r in result]
 
@@ -646,6 +757,7 @@ def search(req: SearchRequest):
         "returned": len(rows),
         "columns": columns + ["match_reason"],
         "rows": rows,
+        "source": source,
     }
 
 

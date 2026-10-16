@@ -48,6 +48,25 @@ docker compose up -d api frontend
 docker compose --profile streamlit up -d streamlit
 ```
 
+### Dataset real (parquet) — leitura lazy
+
+A Pesquisa Interativa lê o dataset real do TCE direto dos parquets (zero-copy, lazy),
+com **pruning por nome de arquivo** (ano/município). Configure a fonte no `.env`:
+
+```bash
+PARQUET_SOURCE=/home/matheus/automacao_api_tse/data   # montado read-only em /parquet
+```
+
+Sem `PARQUET_SOURCE` (ou sem arquivos), a Pesquisa cai automaticamente no seed
+(`data/tce_analysis.duckdb`). A resposta da API traz `source: "parquet" | "seed"`.
+
+Detalhes do dataset real:
+- `exercicio_orcamento` vem como `ano*100` (ex.: `202500`) — o filtro cobre os dois formatos
+- arquivos corrompidos (ex.: `notas_empenho_2025_*_001.parquet`, 12 deles) entram numa
+  blocklist em memória e são pulados automaticamente
+- ordem de grandeza: ~1M notas de empenho em 2025 em 2,2k arquivos → ~3s de varredura
+  (small-file problem — material de estudo)
+
 ---
 
 ## Testes rápidos
@@ -80,6 +99,9 @@ curl -s -X POST http://localhost:9001/api/sql/execute \
 | POST | `/api/sql/stream` | SSE (streaming de resultados) |
 | POST | `/api/saved-queries` | Salva query |
 | POST | `/api/saved-queries/list` | Lista queries salvas |
+| GET | `/api/dashboard/stats` | KPIs e agregados do painel |
+| GET | `/api/search/config` | Config da Pesquisa Interativa |
+| POST | `/api/search` | Pesquisa Interativa (parquet real ou seed) |
 
 ---
 
