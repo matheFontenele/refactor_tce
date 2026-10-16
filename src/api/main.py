@@ -56,7 +56,7 @@ import os
 _here = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get(
     "DUCKDB_PATH",
-    os.path.join(os.path.dirname(_here), "data", "tce_analysis.duckdb"),
+    os.path.join(os.path.dirname(os.path.dirname(_here)), "data", "tce_analysis.duckdb"),
 )
 QUERIES_FILE = os.environ.get(
     "SAVED_QUERIES_FILE",
@@ -303,6 +303,112 @@ def sql_stream(req: ExecuteRequest):
             conn.close()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+# ----------- Dashboard -----------
+
+@app.get("/api/dashboard/stats")
+def dashboard_stats():
+    """Agregações para o Dashboard (KPI cards + gráficos).
+
+    Contrato:
+    totals: {records, value, tables, municipalities}
+    by_year: [{year, records, value}]
+    by_municipality: [{municipality, records, value}]
+    by_document_type: [{type, records, value}]
+    """
+    try:
+        conn = get_db()
+
+        # Lista as tabelas reais (schema main, sem internas)
+        rows = conn.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE schema_name IN ('main', 'public')"
+        ).fetchall()
+        tables = [
+            r[0] for r in rows
+            if not any(r[0].startswith(p) for p in ("duckdb_", "sqlite_", "pragma_"))
+        ]
+        tables.sort()
+
+        if not tables:
+            return {
+                "totals": {"records": 0, "value": 0.0, "tables": 0, "municipalities": 0},
+                "by_year": [],
+                "by_municipality": [],
+                "by_document_type": [],
+            }
+
+        # Totals — uma única query com UNION ALL
+        count_parts = " UNION ALL ".join(
+            f"SELECT COUNT(*) AS cnt, COALESCE(SUM(valor), 0) AS val FROM \"{t}\""
+            for t in tables
+        )
+        recs, val = conn.execute(
+            f"SELECT COALESCE(SUM(cnt), 0), COALESCE(SUM(val), 0) FROM ({count_parts})"
+        ).fetchone()
+
+        # Municípios distintos
+        muni_parts = " UNION ALL ".join(
+            f"SELECT DISTINCT municipio_referencia AS m FROM \"{t}\"" for t in tables
+        )
+        muni_count = conn.execute(
+            f"SELECT COUNT(DISTINCT m) FROM ({muni_parts}) WHERE m IS NOT NULL"
+        ).fetchone()[0]
+
+        # by_year
+        year_parts = " UNION ALL ".join(
+            f"SELECT exercicio_orcamento AS y, 1 AS c, COALESCE(valor, 0) AS v FROM \"{t}\""
+            for t in tables
+        )
+        by_year = [
+            {"year": int(r[0]), "records": int(r[1]), "value": float(r[2])}
+            for r in conn.execute(
+                f"SELECT y, COUNT(*), SUM(v) FROM ({year_parts}) "
+                f"WHERE y IS NOT NULL GROUP BY y ORDER BY y"
+            ).fetchall()
+        ]
+
+        # by_municipality
+        muni_parts2 = " UNION ALL ".join(
+            f"SELECT municipio_referencia AS m, 1 AS c, COALESCE(valor, 0) AS v FROM \"{t}\""
+            for t in tables
+        )
+        by_municipality = [
+            {"municipality": str(r[0]), "records": int(r[1]), "value": float(r[2])}
+            for r in conn.execute(
+                f"SELECT m, COUNT(*), SUM(v) FROM ({muni_parts2}) "
+                f"WHERE m IS NOT NULL GROUP BY m ORDER BY SUM(v) DESC"
+            ).fetchall()
+        ]
+
+        # by_document_type (uma contagem por tabela)
+        dt_parts = " UNION ALL ".join(
+            f"SELECT '{t}' AS tp, COUNT(*) AS c, COALESCE(SUM(valor), 0) AS v FROM \"{t}\""
+            for t in tables
+        )
+        by_document_type = [
+            {"type": str(r[0]), "records": int(r[1]), "value": float(r[2])}
+            for r in conn.execute(
+                f"SELECT tp, c, v FROM ({dt_parts}) ORDER BY c DESC"
+            ).fetchall()
+        ]
+
+        return {
+            "totals": {
+                "records": int(recs),
+                "value": float(val),
+                "tables": len(tables),
+                "municipalities": int(muni_count),
+            },
+            "by_year": by_year,
+            "by_municipality": by_municipality,
+            "by_document_type": by_document_type,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro no dashboard: {str(e)}")
+
 
 # Health endpoint
 @app.get("/health")
