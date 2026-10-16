@@ -1,410 +1,448 @@
-import React, { useState, useEffect, useRef } from "react";
-import { useSSE } from "../hooks/useSSE";
+"use client";
+
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import Editor from "@monaco-editor/react";
 import { useSavedQueries } from "../hooks/useSavedQueries";
 
 /**
- * SQL Studio Editor with Monaco Editor
- * 
- * Features:
- * - Syntax highlight with Monaco
- * - Contextual autocomplete (mock catalog)
- * - Ctrl+Enter to execute
- * - SSE streaming results
- * - SQL guardrails validation
- * - Saved queries/history
- * - Paginated results export
+ * SQL Studio — Monaco Editor + FastAPI backend
+ *
+ * Features (Spec 001):
+ * - FR-001: SQL syntax highlight (Monaco)
+ * - FR-002: autocomplete contextual do catálogo (tabelas/colunas)
+ * - FR-003: execução contra DuckDB com grade de resultados
+ * - FR-004: Ctrl+Enter (Cmd+Enter no Mac) executa
+ * - FR-005/006: guardrails — apenas SELECT/WITH, uma statement por execução
+ * - FR-007: duração + contagem de linhas
+ * - FR-008: export CSV
+ * - FR-009: histórico local das últimas execuções
+ * - FR-012/013: timeout 30s, limite 5000 linhas com aviso de truncamento
  */
 
-const MONACO_EDITOR_SCRIPT = "https://cdn.jsdelivr.net/npm/monaco-editor@/cdnjs/scripts/monaco-editor/min/monaco-editor.js";
-const MONACO_EDITOR_STYLE = "https://cdn.jsdelivr.net/npm/monaco-editor@/cdnjs/css/monaco-editor.min.css";
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
+
+interface QueryResult {
+  success: boolean;
+  data: Array<Record<string, unknown>> | null;
+  columns: string[] | null;
+  row_count: number | null;
+  execution_time: number | null;
+  truncated: boolean;
+  error: string | null;
+}
+
+interface Catalog {
+  tables: string[];
+  views: string[];
+  columns: Record<string, string[]>;
+}
 
 export default function MonacoSQLEditor() {
-  const [sql, setSQL] = useState("");
-  const [results, setResults] = useState<{
-    data: any[];
-    columns: string[];
-    rowCount: number;
-    truncated: boolean;
-    executionTime: number;
-  } | null>(null);
+  const { queries: savedQueries, addQuery } = useSavedQueries();
+
+  const [value, setValue] = useState(
+    "-- SQL Studio — TCE-CE\n-- Ctrl+Enter executa (apenas SELECT/WITH)\nSELECT * FROM notas_empenho LIMIT 10;\n"
+  );
+  const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("ready"); // ready, executing, success, error
-  const [autocomplete, setAutocomplete] = useState<{ label: string; value: string }[]>([]);
-  const [savedQueries, setSavedQueries] = useState<{ name: string; sql: string }[]>([]);
-  const [queryHistory, setQueryHistory] = useState<string[]>([]);
-  
-  const editorRef = useRef<any>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [history, setHistory] = useState<
+    Array<{ sql: string; at: string; ok: boolean; duration?: number | null }>
+  >([]);
+  const [saveName, setSaveName] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
 
-  // Initialize Monaco Editor
-  useEffect(() => {
-    // Load Monaco CSS
-    const styleTag = document.createElement("link");
-    styleTag.rel = "stylesheet";
-    styleTag.href = MONACO_EDITOR_STYLE;
-    document.head.appendChild(styleTag);
+  const editorRef = useRef<unknown>(null);
 
-    // Load Monaco script
-    const scriptTag = document.createElement("script");
-    scriptTag.src = MONACO_EDITOR_SCRIPT;
-    scriptTag.async = true;
-    scriptTag.onload = () => {
-      initMonaco();
-    };
-    document.head.appendChild(scriptTag);
-
-    return () => {
-      document.head.removeChild(styleTag);
-      document.head.removeChild(scriptTag);
-    };
-  }, []);
-
-  const initMonaco = () => {
-    if (typeof monaco === "undefined") return;
-
-    // Register the SQL dialect
-    monaco.editor.registerLanguageActionHandler("sql", {});
-    monaco.editor.registerExternalLexer("sql", monaco.SyntaxFragments);
-
-    // Create the editor
-    const editor = monaco.editor.create(editorRef.current, {
-      value: "-- Digite sua query SQL aqui\n-- Exemplo: SELECT * FROM notas_empenho LIMIT 10\n",
-      language: "sql",
-      theme: "tailwind-light", // Will be overridden
-      fontSize: 14,
-      zoom: 1,
-      automaticLayout: true,
-      placeholder: "Editor SQL - Ctrl+Enter para executar",
-      autoFill: true,
-      contextMenu: true,
-    });
-
-    // Set editor height to fill available space
-    const handleResize = () => {
-      editor.layout();
-    };
-    window.addEventListener("resize", handleResize);
-    handleResize();
-
-    // Ctrl+Enter to execute
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "Enter") {
-        e.preventDefault();
-        executeQuery();
-      }
-      if (e.key === "/") {
-        e.preventDefault();
-        focusAutocomplete();
-      }
-    };
-    editor.addCommand(monaco.editor.CtrlMod + "Enter", executeQuery);
-    editor.addCommand("mod+Enter", executeQuery);
-    window.addEventListener("keydown", handleKeyDown);
-
-    // Autocomplete on trigger
-    editor.onDidChangeCursorPosition((e: any) => {
-      if e.autoHideKeyboard {
-        // Trigger search after user types
-        const text = editor.getValue();
-        const lastWord = text.split(/[\s(]+/).filter(w => w).last();
-        if (lastWord.length >= 2) {
-          searchAutocomplete(lastWord);
-        } else {
-          setAutocomplete([]);
-        }
-      }
-    });
-
-    // Listen for autocomplete suggestions from API
-    editor.onDidChangeListener(() => {
-      // Debounced autocomplete
-    });
-  };
-
-  // Execute query via SSE
-  const executeQuery = async () => {
-    const editor = editorRef.current?.getValue();
-    if (!editor) return;
-
-    const query = editor.trim();
-    if (!query) return;
-
-    setStatus("executing");
-    setLoading(true);
-    setResults(null);
-
+  // ---- Catálogo (FR-002) ----
+  const loadCatalog = useCallback(async () => {
     try {
-      // Save to history
-      setQueryHistory(prev => {
-        const updated = [...prev, query];
-        return updated.filter((q, i) => q !== prev[0]) // Remove duplicate if exists, keep order
-          .slice(0, 50); // Keep last 50
-      });
-
-      // Call API endpoint
-      const response = await fetch("/api/sql/execute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql: query, max_rows: 5000 }),
-        credentials: "include",
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setStatus("error");
-        setError(data.error || "Erro desconhecido na execução");
-        return;
-      }
-
-      setResults(data);
-      setStatus("success");
-      
-      // Truncated warning
-      if (data.truncated) {
-        setStatus("truncated");
-      }
-    } catch (err: any) {
-      setStatus("error");
-      setError(err.message || "Erro ao conectar com o servidor");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Search autocomplete
-  const searchAutocomplete = async (query: string) => {
-    try {
-      const response = await fetch("/api/sql/catalog", {
+      const res = await fetch(`${API_URL}/api/sql/catalog`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
-        credentials: "include",
+      });
+      if (res.ok) {
+        const data = (await res.json()) as Catalog;
+        setCatalog(data);
+      }
+    } catch {
+      // catálogo indisponível — autocomplete fica vazio
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCatalog();
+  }, [loadCatalog]);
+
+  // ---- Execução (FR-003, FR-004, FR-005, FR-006) ----
+  const executeQuery = useCallback(async () => {
+    const editor = editorRef.current as
+      | { getValue: () => string; getSelection: () => unknown; getModel: () => unknown }
+      | null;
+    if (!editor) return;
+
+    let sql = editor.getValue().trim();
+    // Se houver seleção, executar apenas a seleção
+    const selection = editor.getSelection() as
+      | { isEmpty?: () => boolean }
+      | null;
+    // (mantemos simples: executar tudo se não houver seleção tratada)
+
+    if (!sql) return;
+
+    // Remove comentário de linha inicial apenas para validação simples no backend
+    setLoading(true);
+    setErrorMsg(null);
+    setResult(null);
+
+    const startedAt = new Date();
+    try {
+      const res = await fetch(`${API_URL}/api/sql/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, max_rows: 5000, timeout: 30 }),
       });
 
-      const catalog = await response.json();
-      
-      const suggestions: { label: string; value: string }[] = [];
-      
-      // Search tables
-      if catalog.tables && Array.isArray(catalog.tables) && catalog.tables.length > 0) {
-        suggestions.push(...catalog.tables.filter((t: string) => 
-          t.toLowerCase().startsWith(query.toLowerCase())
-        ).map((t: string) => ({ label: t, value: t })));
-      }
-      
-      // Search columns
-      if catalog.columns && typeof catalog.columns === "object") {
-        Object.entries(catalog.columns).forEach(([table, cols]: any) => {
-          cols.forEach((col: string) => {
-            if col.toLowerCase().startsWith(query.toLowerCase())) {
-              suggestions.push({ label: `${table}.${col}`, value: `${table}.${col}` });
-            }
-          });
-        });
+      const data = (await res.json()) as QueryResult | { detail?: string };
+
+      if (!res.ok) {
+        const detail =
+          (data as { detail?: string }).detail || `Erro HTTP ${res.status}`;
+        setErrorMsg(detail);
+        setHistory((h) => [
+          { sql, at: startedAt.toLocaleTimeString(), ok: false },
+          ...h,
+        ].slice(0, 50));
+        return;
       }
 
-      setAutocomplete(suggestions);
+      const qr = data as QueryResult;
+      if (!qr.success) {
+        setErrorMsg(qr.error || "Erro desconhecido na execução");
+        setHistory((h) => [
+          { sql, at: startedAt.toLocaleTimeString(), ok: false },
+          ...h,
+        ].slice(0, 50));
+        return;
+      }
+
+      setResult(qr);
+      setHistory((h) => [
+        {
+          sql,
+          at: startedAt.toLocaleTimeString(),
+          ok: true,
+          duration: qr.execution_time,
+        },
+        ...h,
+      ].slice(0, 50));
     } catch (err) {
-      setAutocomplete([]);
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`Falha de conexão: ${msg}`);
+      setHistory((h) => [
+        { sql, at: startedAt.toLocaleTimeString(), ok: false },
+        ...h,
+      ].slice(0, 50));
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
-  const focusAutocomplete = () => {
-    // Focus the first suggestion
-    if (autocomplete.length > 0) {
-      // Could integrate with editor focus
-    }
-  };
+  // ---- Ctrl+Enter / Cmd+Enter (FR-004) ----
+  const handleEditorMount = useCallback(
+    (editor: unknown) => {
+      editorRef.current = editor;
+      const ed = editor as {
+        addCommand: (keybinding: number, handler: () => void) => void;
+        getValue: () => string;
+      };
+      // KeyMod.CtrlCmd | KeyCode.Enter
+      ed.addCommand(2048 | 3, () => {
+        executeQuery();
+      });
+    },
+    [executeQuery]
+  );
 
-  // Handle autocomplete selection
-  const handleAutocompleteSelect = (selection: { label: string; value: string }) => {
-    const editor = editorRef.current;
-    if (editor) {
-      const cursor = editor.getCursor();
-      editor.setValue(
-        editor.getValue().slice(0, cursor.offset) + " " + selection.value + " " + editor.getValue().slice(cursor.offset)
-      );
-      editor.setFocus();
-    }
-    setAutocomplete([]);
-  };
+  // ---- Autocomplete contextual (FR-002) ----
+  const handleBeforeMount = useCallback(
+    (monaco: any) => {
+      monaco.languages.registerCompletionItemProvider("sql", {
+        triggerCharacters: [" ", ".", ","],
+        provideCompletionItems: (model: any, position: any) => {
+          const word = model.getWordUntilPosition(position);
+          const range = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: word.startColumn,
+            endColumn: word.endColumn,
+          };
+          const suggestions: any[] = [];
 
-  // Render error
-  let errorUI = null;
-  if (status === "error") {
-    errorUI = (
-      <div className="mt-2 p-2 rounded bg-red-100 text-red-800 small">
-        ❌ Erro: {error || "Erro desconhecido"}
-      </div>
+          if (catalog) {
+            for (const t of [...catalog.tables, ...catalog.views]) {
+              suggestions.push({
+                label: t,
+                kind: monaco.languages.CompletionItemKind.Class,
+                insertText: t,
+                detail: catalog.views.includes(t) ? "view" : "tabela",
+                range,
+              });
+            }
+            for (const [table, cols] of Object.entries(catalog.columns)) {
+              for (const col of cols) {
+                suggestions.push({
+                  label: `${table}.${col}`,
+                  kind: monaco.languages.CompletionItemKind.Field,
+                  insertText: `${table}.${col}`,
+                  detail: `coluna de ${table}`,
+                  range,
+                });
+              }
+            }
+          }
+          // Keywords básicas se catálogo vazio
+          if (!catalog || suggestions.length === 0) {
+            for (const kw of ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "LIMIT", "JOIN", "WITH"]) {
+              suggestions.push({
+                label: kw,
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: kw,
+                range,
+              });
+            }
+          }
+          return { suggestions };
+        },
+      });
+    },
+    [catalog]
+  );
+
+  // ---- Export CSV (FR-008) ----
+  const exportCSV = () => {
+    if (!result?.data || !result.columns) return;
+    const header = result.columns.join(",");
+    const rows = result.data.map((row) =>
+      result.columns!
+        .map((c) => {
+          const v = row[c];
+          const s = v === null || v === undefined ? "" : String(v);
+          return `"${s.replace(/"/g, '""')}"`;
+        })
+        .join(",")
     );
-  }
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sql-result-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
-  // Render truncated warning
-  let truncatedUI = null;
-  if (status === "truncated" || (results && results.truncated)) {
-    truncatedUI = (
-      <div className="mt-2 p-2 rounded bg-yellow-100 text-yellow-800 small">
-        ⚠️ Resultados truncados: {results?.rowCount || 0} linhas exibidas de {results?.rowCount || 0} totais
-      </div>
-    );
-  }
-
-  // Render autocomplete panel
-  const autocompleteUI = autocomplete.length > 0 ? (
-    <div className="autocomplete-panel absolute z-10 max-h-20 overflow-y-auto bg-white rounded border border-gray-300 shadow-lg mt-2 w-100">
-      {autocomplete.map((item, idx) => (
-        <div
-          key={item.value}
-          className="px-3 py-2 cursor-pointer hover:bg-gray-50"
-          onMouseOver => setHoverIdx(idx)
-          onClick => handleAutocompleteSelect(item)
-        >
-          {item.label}
-        </div>
-      ))}
-    </div>
-  ) : null;
+  // ---- Salvar query (FR-010) ----
+  const handleSave = () => {
+    if (!saveName.trim()) {
+      setErrorMsg("Dê um nome para salvar a query.");
+      return;
+    }
+    addQuery(saveName.trim(), value);
+    setSaveName("");
+  };
 
   return (
-    <div className="min-h-75vh p-4 bg-gray-50">
-      <h1 className="mb-4 font-bold text-24">
-        SQL Studio — Editor de Consultas Analíticas
-      </h1>
-
-      <div className="mb-3">
-        <label className="font-small text-gray-700 mb-1 d-block">
-          Digite uma query SQL (SELECT/WITH apenas):
-        </label>
-        <textarea
-          ref={editorRef}
-          rows={4}
-          className="w-full border border-gray-300 rounded p-2 resize-none focus:ring-2 focus:ring-primary-600 focus:outline-none"
-          placeholder="Ex: SELECT municipio_referencia, COUNT(*) FROM liquidacoes GROUP BY municipio_referencia LIMIT 10"
-        ></textarea>
-      </div>
-
-      <div className="d-flex gap-2 mb-3">
-        <button
-          onClick={executeQuery}
-          className="flex-1 btn-primary rounded py-2 px-4 flex items-center justify-center"
-          disabled={loading}
-        >
-          {loading ? (
-            <span className="spinner spinner-small mr-2" />
-          ) : (
-            <>
-              <svg className="w-2 h-2 mr-2" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M7.5 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zM15 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zM21 12c0-3.87-3.13-7-7-7S7 8.13 7 12 10.13 22 14 22 21 15.87 21 12z"/>
-              </svg>
-              Executar
-            </>
-          )}
-        </button>
-        
-        <button
-          onClick={() => fetch("/api/saved-queries/list", { method: "POST", body: JSON.stringify({}), credentials: "include" })}
-          className="btn-secondary rounded py-2 px-4"
-          disabled={loading}
-        >
-          Carregar Salva
-        </button>
-      </div>
-
-      <div className="autocomplete-panel-container">
-        {autocompleteUI}
-      </div>
-
-      {/* Results Area */}
-      {status === "success" && results && (
-        <div className="mt-4 space-y-3">
-          <div className="flex justify-between align-center text-sm text-gray-600">
-            <span>Linhas: {results.rowCount || 0}</span>
-            <span>Tempo: {results.executionTime || 0}s</span>
-          </div>
-          
-          {results.truncated && (
-            <p className="text-sm text-yellow-700">
-              ⚠️ Resultados truncados em {results.rowCount || 0} linhas (máximo 5000)
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-4">
+      <div className="max-w-7xl mx-auto space-y-4">
+        <header className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">SQL Studio — TCE-CE</h1>
+            <p className="text-slate-400 text-sm">
+              Editor SQL com guardrails (somente leitura). API: {API_URL}
             </p>
-          )}
+          </div>
+          <button
+            onClick={executeQuery}
+            disabled={loading}
+            className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 font-semibold"
+          >
+            {loading ? "Executando…" : "▶ Executar (Ctrl+Enter)"}
+          </button>
+        </header>
 
-          <div className="rounded overflow-hidden shadow-sm mb-3" style={{ height: "400px" }}>
-            <table className="w-full text-sm text-left text-gray-700">
-              <thead>
-                <tr>
-                  {results.columns.map((col: string) => (
-                    <th key={col} className="border-bottom pb-2 font-medium text-gray-500 uppercase small">{col}</th>
+        {/* Painéis laterais */}
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+          <aside className="space-y-3">
+            <div className="rounded-lg bg-slate-900 border border-slate-800 p-3">
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">
+                Queries salvas
+              </h3>
+              {savedQueries.length === 0 ? (
+                <p className="text-xs text-slate-500">Nenhuma ainda.</p>
+              ) : (
+                <ul className="space-y-1">
+                  {savedQueries.map((q) => (
+                    <li key={q.name}>
+                      <button
+                        className="text-left text-sm text-emerald-400 hover:underline w-full truncate"
+                        onClick={() => setValue(q.sql)}
+                      >
+                        {q.name}
+                      </button>
+                    </li>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {results.data.map((row: any, rowIdx: number) => (
-                  <tr key={rowIdx} className="border-b hover:bg-gray-50">
-                    {results.columns.map((col: string, colIdx: number) => (
-                      <td key={colIdx} className="align-middle px-3 py-2 {
-                        colIdx === 0 ? "font-medium" : ""
-                      }" style={{ whiteSpace: "nowrap" }}>{row[col] || "—"}</td>
-                    ))}
-                  </tr>
-                ))}
-                {results.data.length < (results.rowCount || 1) && (
-                  <tr>
-                    <td colspan={results.columns.length} className="text-gray-400 py-2 text-small">
-                      {results.rowCount} linhas totais (exibindo {results.data.length})
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </ul>
+              )}
+              <div className="mt-3 flex gap-2">
+                <input
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  placeholder="nome da query"
+                  className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm"
+                />
+                <button
+                  onClick={handleSave}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-sm"
+                >
+                  Salvar
+                </button>
+              </div>
+            </div>
 
-          <div className="d-flex gap-2">
-            <button
-              className="btn-secondary rounded py-2 px-4 flex items-center justify-center small"
-              onClick={() => exportCSV(results.data, results.columns)}
-            >
-              <svg className="w-2 h-2 mr-1" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M17.22 7.99c.53-.81.02-1.86-.03-2.38l-2.42-2.42a5 5 0 0 0-7.07 0l-1.06 1.06c-.57.57-.57 1.45 0 2.02l1.41 1.41c.53.53-.46 1.04-1.04.52L8.06 14.08a5 5 0 0 0 0 7.07l1.98 1.98c.55.53.01 1.04-.55.52l-1.06-1.06a5 5 0 0 0-7.07 0L3.96 21.04c-.58.56-.04 1.04 0.76 1.04h.01c.8 0 1.47-.19 2.02-.5l1.06-1.06c.56-.56.52-1.04-.03-1.6l1.41-1.41a5.99 5.99 0 0 0 1.44-4.53l1.07-1.06c.56-.56.52-1.04.02-1.6L7.06 13.5a5.99 5.99 0 0 0-4.53-1.44L3.5 16.03c-.58-.57-.01-1.25 0.76-1.39l1.06-1.06c.57.57 1.25.07 1.62.72l1.06 1.06a5 5 0 0 0 0 7.07l1.06-1.06c.57-.56.03-1.26-.74-1.64L5. 12l-1.06-1.06c.58-.57.01-1.25 0.76-1.39l1.06-1.06c.56-.56.52-1.04.03-1.6l-1.41-1.41a5.99 5.99 0 0 0-4.53 1.44l-1.06 1.06c-.57.57-.01 1.25 0.76 1.39l1.06 1.06a5 5 0 0 0 4.53 1.44l1.06-1.06c-.57-.57-.01-1.25-.76-1.39L3.56 12l-1.06-1.06c-.57-.57-.01-1.25 0.76-1.39l1.06-1.06a5 5 0 0 0 1.44-4.53l-1.06 1.06c-.56.57-.52 1.04 1.04.52l1.41 1.41c.53.53 1.04.04 1.04-.52l-1.41 1.41a5 5 0 0 0 0 7.07l1.98-1.98c.53-.56.02-1.07.73-1.59l1.06-1.06zM7.5 17.5c-1.14 0-2.07-1.06-2.07-2.25c0-1.19 0.93-2.16 2.07-2.16s2.07 0.97 2.07 2.16C9.57 16.44 8.64 17.5 7.5 17.5zM15 17.5c-1.14 0-2.07-1.06-2.07-2.25c0-1.19 0.93-2.16 2.07-2.16s2.07 0.97 2.07 2.16C13.07 16.44 12.14 17.5 15 17.5z"/>
-              </svg>
-              CSV
-            </button>
-            
-            <button
-              className="btn-secondary rounded py-2 px-4 flex items-center justify-center small"
-              onClick={() => exportParquet(results.data, results.columns)}
-            >
-              <svg className="w-2 h-2 mr-1" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M19 13v3a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3.34l.46 1.68a2 2 0 0 1 1.64 1.24h8a2 2 0 0 1 1.96 1.16l-.45 1.68V13h2v-2.06l-2-.95a1 1 0 0 0-.71-.32l-2.31-1.65a1 1 0 0 0-.9-.15h-5.06l-2.31 1.65a1 1 0 0 0-.9.15H5a1 1 0 0 0-.71.32l2.31.95V13h2z"/>
-              </svg>
-              Parquet
-            </button>
-          </div>
+            <div className="rounded-lg bg-slate-900 border border-slate-800 p-3">
+              <button
+                onClick={() => setShowHistory((s) => !s)}
+                className="text-sm font-semibold text-slate-300"
+              >
+                Histórico ({history.length}) {showHistory ? "▾" : "▸"}
+              </button>
+              {showHistory && (
+                <ul className="mt-2 space-y-1 max-h-60 overflow-auto">
+                  {history.map((h, i) => (
+                    <li key={i} className="text-xs">
+                      <button
+                        className={`text-left w-full truncate hover:underline ${
+                          h.ok ? "text-slate-300" : "text-rose-400"
+                        }`}
+                        onClick={() => setValue(h.sql)}
+                        title={h.sql}
+                      >
+                        [{h.at}{h.duration != null ? ` · ${h.duration}s` : ""}]{" "}
+                        {h.sql.slice(0, 40)}
+                        {h.sql.length > 40 ? "…" : ""}
+                      </button>
+                    </li>
+                  ))}
+                  {history.length === 0 && (
+                    <li className="text-xs text-slate-500">Sem execuções.</li>
+                  )}
+                </ul>
+              )}
+            </div>
+          </aside>
+
+          {/* Editor + Resultados */}
+          <main className="lg:col-span-3 space-y-4">
+            <div className="rounded-lg overflow-hidden border border-slate-800">
+              <Editor
+                height="320px"
+                defaultLanguage="sql"
+                theme="vs-dark"
+                value={value}
+                onChange={(v) => setValue(v ?? "")}
+                onMount={handleEditorMount}
+                beforeMount={handleBeforeMount}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 14,
+                  automaticLayout: true,
+                  scrollBeyondLastLine: false,
+                  quickSuggestions: true,
+                  suggestOnTriggerCharacters: true,
+                }}
+              />
+            </div>
+
+            {errorMsg && (
+              <div className="rounded-lg bg-rose-950 border border-rose-800 text-rose-200 p-3 text-sm">
+                ✖ {errorMsg}
+              </div>
+            )}
+
+            {result && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex gap-4 text-slate-400">
+                    <span>{result.row_count ?? 0} linhas</span>
+                    <span>{result.execution_time ?? 0}s</span>
+                    {result.truncated && (
+                      <span className="text-amber-400">
+                        ⚠ truncado em 5000 linhas
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={exportCSV}
+                    className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-sm"
+                  >
+                    ⬇ Exportar CSV
+                  </button>
+                </div>
+
+                <div className="rounded-lg border border-slate-800 overflow-auto max-h-[420px]">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-900 sticky top-0">
+                      <tr>
+                        {(result.columns ?? []).map((c) => (
+                          <th
+                            key={c}
+                            className="text-left px-3 py-2 font-medium text-slate-300 border-b border-slate-800 whitespace-nowrap"
+                          >
+                            {c}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(result.data ?? []).map((row, i) => (
+                        <tr
+                          key={i}
+                          className="odd:bg-slate-950 even:bg-slate-900/60"
+                        >
+                          {(result.columns ?? []).map((c) => (
+                            <td
+                              key={c}
+                              className="px-3 py-1.5 text-slate-200 whitespace-nowrap"
+                            >
+                              {row[c] === null || row[c] === undefined
+                                ? "—"
+                                : String(row[c])}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                      {(result.data ?? []).length === 0 && (
+                        <tr>
+                          <td
+                            colSpan={(result.columns ?? [""]).length}
+                            className="px-3 py-4 text-center text-slate-500"
+                          >
+                            Sem linhas.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </main>
         </div>
-      )}
-
-      {errorUI}
+      </div>
     </div>
   );
-}
-
-// Export helpers
-function exportCSV(data: any[], columns: string[]) {
-  const csvHeader = columns.join(",");
-  const csvRows = data.map(row => columns.map(col => {
-    const val = row[col] || "";
-    return `"${String(val).replace(/"/g, '""')}"`;
-  }));
-  const csvContent = [csvHeader, ...csvRows].join("\n");
-  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "query-results.csv";
-  link.click();
-  URL.destroyObjectURL(url);
-}
-
-function exportParquet(data: any[], columns: string[]) {
-  // Mock parquet export - in production would use pyarrow
-  alert("Exportação em Parquet não disponível no frontend MVP - usar backend");
 }

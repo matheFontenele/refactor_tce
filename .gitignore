@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Next.js
+.next/
+out/
+next-env.d.ts
+
+# Data (fonte de verdade local - não versionar)
+data/*.duckdb
+data/*.json
+data/*.parquet
+
+# Env
+.env
+.env.local
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
