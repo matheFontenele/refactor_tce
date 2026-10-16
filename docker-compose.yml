@@ -10,8 +10,12 @@ services:
     environment:
       - DUCKDB_PATH=/data/tce_analysis.duckdb
       - MEMORY_LIMIT=1536
+      - ENDPOINTS_FILE=/config/endpoints.json
+      - MUNICIPIOS_FILE=/config/municipios.json
     volumes:
       - ./data:/data:ro
+      - ./endpoints.json:/config/endpoints.json:ro
+      - ./municipios.json:/config/municipios.json:ro
     healthcheck:
       test:
         [

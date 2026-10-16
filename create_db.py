@@ -1,54 +1,42 @@
 """Seed do DuckDB com os 21 tipos de documento do TCE-CE (endpoints.json).
 
-Este script cria o banco analítico de demonstração/refatoração.
-O banco real é alimentado pelo pipeline de extração (Airflow + extração sob demanda).
+- Schema por categoria derivado de endpoints.json (fonte única de verdade):
+  colunas base unificadas + colunas extras (colunas_texto, campos_ui, layout_card).
+- Semeia TODAS as 21 categorias para que a Pesquisa Interativa retorne dados.
+
+O banco real é alimentado pelo pipeline de extração (Airflow + ingestão sob demanda).
 """
 
-import duckdb
+import datetime as dt
+import json
 import os
 
+import duckdb
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get(
     "DUCKDB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tce_analysis.duckdb"),
+    os.path.join(PROJECT_ROOT, "data", "tce_analysis.duckdb"),
 )
+ENDPOINTS_FILE = os.environ.get(
+    "ENDPOINTS_FILE",
+    os.path.join(PROJECT_ROOT, "endpoints.json"),
+)
+MUNICIPIOS_FILE = os.path.join(PROJECT_ROOT, "municipios.json")
 
-# 21 tipos de documento do endpoints.json (nomes normalizados p/ SQL)
-DOCUMENT_TYPES = [
-    "notas_empenho",
-    "notas_fiscais",
-    "notas_pagamento",
-    "cheques_notas_pagamento",
-    "notas_pagamento_folha",
-    "despesas_extra_orcamentarias",
-    "pagamentos_liquidacoes",
-    "liquidacoes",
-    "bens_incorporados",
-    "controle_alocacao_bens",
-    "ajuste_reavaliacao_obras",
-    "controle_bens_notas_empenho",
-    "contas_redutoras_bens",
-    "itens_notas_fiscais",
-    "veiculos_municipais",
-    "veiculos_locados",
-    "veiculos_cedidos",
-    "destinacao_veiculos",
-    "baixa_destinacao_veiculos",
-    "controle_abastecimento",
-    "controle_manutencao_veiculos",
+# Colunas unificadas presentes em TODAS as tabelas (dashboard depende delas)
+BASE_COLUMNS = [
+    ("id", "INTEGER"),
+    ("exercicio_orcamento", "INTEGER"),
+    ("municipio_referencia", "VARCHAR"),
+    ("nome_negociante", "VARCHAR"),
+    ("numero_documento", "VARCHAR"),
+    ("data_registro", "DATE"),
+    ("valor", "DECIMAL(18,2)"),
 ]
+BASE_NAMES = {c for c, _ in BASE_COLUMNS}
 
-# Schema mínimo comum derivado dos schemas declarativos (src/schemas/)
-COMMON_COLUMNS = """
-    id INTEGER,
-    exercicio_orcamento INTEGER,
-    municipio_referencia VARCHAR,
-    nome_negociante VARCHAR,
-    numero_documento VARCHAR,
-    data_registro DATE,
-    valor DECIMAL(18,2)
-"""
-
-# Dados de exemplo por tipo (municípios reais do municípios.json)
+# (id, exercicio, municipio, fornecedor, numero_documento, data, valor)
 SAMPLE_ROWS = {
     "notas_empenho": [
         (1, 2025, "Crato", "CONSTRUTORA NORDESTE LTDA", "NE-2025-0001", "2025-01-15", 15000.00),
@@ -72,7 +60,7 @@ SAMPLE_ROWS = {
         (2, 2025, "Fortaleza", "FIAT CRONOS PLACA PQL-8A11", "VEI-0002", "2025-01-01", 72000.00),
         (3, 2025, "Sobral", "AMBULANCIA FIAT DUCATO PLACA RMU-7B22", "VEI-0003", "2025-02-15", 145000.00),
     ],
-    "controle_abastecimento": [
+    "controle_abastecimento_veiculos": [
         (1, 2025, "Crato", "POSTO CENTRAL LTDA", "ABS-2025-001", "2025-01-20", 850.00),
         (2, 2025, "Fortaleza", "POSTO ROTA 020", "ABS-2025-002", "2025-01-25", 1200.00),
     ],
@@ -83,30 +71,182 @@ SAMPLE_ROWS = {
 }
 
 
+def load_config():
+    with open(ENDPOINTS_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_municipio_codes():
+    """dict nome_upper -> codigo_municipio (para seed do codigo_municipio)."""
+    try:
+        with open(MUNICIPIOS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            m["nome_municipio"].upper(): m["codigo_municipio"]
+            for m in data.get("elements", [])
+        }
+    except Exception:
+        return {}
+
+
+def extra_columns(cat_cfg: dict) -> list:
+    """Colunas extras da categoria derivadas do endpoints.json."""
+    cols: dict = {}
+
+    def add(name, type_hint=None):
+        if not isinstance(name, str) or not name or name in BASE_NAMES or name in cols:
+            return
+        if type_hint:
+            cols[name] = type_hint
+        elif name.startswith("data_"):
+            cols[name] = "DATE"
+        elif name.startswith(("valor_", "quantidade_", "qtd_")):
+            cols[name] = "DOUBLE"
+        else:
+            cols[name] = "VARCHAR"
+
+    for col in cat_cfg.get("colunas_texto", {}):
+        add(col)
+    for campo in cat_cfg.get("campos_ui", []):
+        add(campo.get("id"))
+    layout = cat_cfg.get("layout_card") or {}
+    corpo = layout.get("corpo_texto")
+    if isinstance(corpo, list):
+        for c in corpo:
+            add(c)
+    else:
+        add(corpo)
+    add(layout.get("topo_esq"))
+    add(layout.get("titulo_grande"))
+    for meta in layout.get("metadados", []) or []:
+        add(meta.get("coluna"))
+    for item in layout.get("grid_financeiro", []) or []:
+        add(item.get("coluna"))
+    return [(c, cols[c]) for c in cols]
+
+
+def seed_extra_value(col, typ, row, municipio_codes):
+    """Valor de exemplo plausível para coluna extra."""
+    _id, _ano, municipio, fornecedor, numero_doc, data_reg, valor = row
+    nome_mun = municipio.upper()
+
+    if col == "municipio_referencia":
+        return municipio
+    if col in ("nome_negociante", "numero_documento"):
+        return fornecedor if col == "nome_negociante" else numero_doc
+    if col == "codigo_municipio":
+        return municipio_codes.get(nome_mun, "999")
+    if col.startswith("codigo_"):
+        return "001"
+    if col.startswith("numero_") or col in ("renavam_traduzido", "codigo_renavam"):
+        return numero_doc
+    if col.startswith("nome_") or col.startswith("orgao"):
+        return fornecedor
+    if col.startswith("cpf_cnpj"):
+        return "12.345.678/0001-90"
+    if col.startswith("data_"):
+        return data_reg
+    if col.startswith("valor_"):
+        return float(valor)
+    if col.startswith("quantidade_"):
+        return 10.0
+    if col == "status_pagamento":
+        return ["PAGO", "PARCIAL", "PENDENTE"][_id % 3]
+    if col == "tipo_vinculo":
+        return "PRÓPRIO"
+    if col.startswith(("descricao_", "historico", "especificacao")):
+        return f"Histórico de {numero_doc} referente a {municipio}"
+    if col.startswith(("tipo_", "estado_", "classe")):
+        return "CLASSIFICACAO GERAL"
+    if "traduzid" in col or col.startswith(("placa", "chassi")):
+        return f"TRAD-{numero_doc}"
+    if col == "ano_modelo":
+        return "2022"
+    if col == "vida_util":
+        return "5"
+    if col == "veiculo_completo":
+        return f"VEICULO {numero_doc} - {municipio}"
+    if typ == "DATE":
+        return data_reg
+    if typ == "DOUBLE":
+        return float(valor)
+    # fallback: string pesquisável contendo o número do documento
+    return f"{col.replace('_', ' ')} {numero_doc}"
+
+
+def generic_sample_rows(table: str, n: int = 2):
+    """Linhas de exemplo para categorias sem seed específico."""
+    ano = 2025
+    munis = ["Crato", "Fortaleza", "Sobral"]
+    fornecedores = [
+        "CONSTRUTORA NORDESTE LTDA",
+        "SERVICOS GERAIS CEARA ME",
+        "MEDICAMENTOS VIDA LTDA",
+    ]
+    rows = []
+    for i in range(1, n + 1):
+        doc = f"DOC-2025-{abs(hash((table, i))) % 9000 + 1000}"
+        rows.append(
+            (
+                i,
+                ano if i % 2 else ano - 1,
+                munis[i % len(munis)],
+                fornecedores[i % len(fornecedores)],
+                doc,
+                f"{ano}-0{(i % 9) + 1}-1{i}",
+                round(1500.0 + 700.0 * i, 2),
+            )
+        )
+    return rows
+
+
 def main():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    config = load_config()
+    municipio_codes = load_municipio_codes()
+
     conn = duckdb.connect(DB_PATH, read_only=False)
 
-    created = 0
-    for table in DOCUMENT_TYPES:
-        conn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({COMMON_COLUMNS})')
-        created += 1
+    # Recria tudo (schema pode ter evoluído)
+    for cat_cfg in config.values():
+        table = cat_cfg["prefixo"]
+        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
 
-        rows = SAMPLE_ROWS.get(table, [])
+    total_rows = 0
+    for cat, cat_cfg in config.items():
+        table = cat_cfg["prefixo"]
+        cols = BASE_COLUMNS + extra_columns(cat_cfg)
+        col_defs = ", ".join(f'"{c}" {t}' for c, t in cols)
+        conn.execute(f'CREATE TABLE "{table}" ({col_defs})')
+
+        rows = SAMPLE_ROWS.get(table) or generic_sample_rows(table)
+        extra = [c for c, _ in cols if c not in BASE_NAMES]
+        col_names = [c for c, _ in cols]
+
         for row in rows:
+            values = list(row)
+            if isinstance(values[5], str):
+                values[5] = dt.date.fromisoformat(values[5])
+            for col in extra:
+                typ = dict(cols)[col]
+                v = seed_extra_value(col, typ, row, municipio_codes)
+                if typ == "DATE" and isinstance(v, str):
+                    v = dt.date.fromisoformat(v)
+                values.append(v)
+            placeholders = ", ".join("?" * len(values))
+            quoted_cols = ", ".join('"' + c + '"' for c in col_names)
             conn.execute(
-                f'INSERT INTO "{table}" (id, exercicio_orcamento, municipio_referencia, '
-                f"nome_negociante, numero_documento, data_registro, valor) VALUES (?,?,?,?,?,?,?)",
-                list(row),
+                f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})',
+                values,
             )
+        total_rows += len(rows)
 
     tables = conn.execute("SHOW TABLES").fetchall()
-    print(f"Banco criado: {len(tables)} tabelas ({len(DOCUMENT_TYPES)} tipos de documento)")
-    total = 0
+    print(f"Banco criado: {len(tables)} tabelas ({len(config)} tipos de documento)")
+    print(f"Total de linhas de exemplo: {total_rows}")
     for t in tables:
         cnt = conn.execute(f'SELECT COUNT(*) FROM "{t[0]}"').fetchone()[0]
-        total += cnt
-    print(f"Total de linhas de exemplo: {total}")
+        print(f"  {t[0]}: {cnt}")
     conn.close()
 
 

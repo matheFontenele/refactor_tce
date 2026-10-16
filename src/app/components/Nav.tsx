@@ -2,7 +2,7 @@
 
 import React from "react";
 
-export type Tab = "dashboard" | "sql";
+export type Tab = "dashboard" | "search" | "sql";
 
 /**
  * Nav — navegação entre Dashboard e SQL Studio.
@@ -17,6 +17,7 @@ export default function Nav({
 }) {
   const tabs: Array<{ id: Tab; label: string }> = [
     { id: "dashboard", label: "Dashboard" },
+    { id: "search", label: "🔍 Pesquisa" },
     { id: "sql", label: "SQL Studio" },
   ];
 
