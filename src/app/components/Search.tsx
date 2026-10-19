@@ -316,6 +316,21 @@ export default function Search() {
     [config, category],
   );
 
+  // Motor híbrido de filtros (igual ao projeto original): campos_ui (selects)
+  // + colunas_texto — cada coluna de texto vira um filtro "Digite X..."
+  const camposEspecificos: CampoUI[] = useMemo(() => {
+    if (!cat) return [];
+    const textos: CampoUI[] = Object.entries(cat.colunas_texto || {}).map(
+      ([id, label]) => ({
+        id,
+        label: `🏷️ ${label}`,
+        tipo: "text" as const,
+        placeholder: `Digite ${label.toLowerCase()}...`,
+      }),
+    );
+    return [...(cat.campos_ui || []), ...textos];
+  }, [cat]);
+
   const onCategoryChange = (name: string) => {
     setCategory(name);
     setFilters({});
@@ -463,14 +478,14 @@ export default function Search() {
           </div>
         </div>
 
-        {/* Campos dinâmicos da categoria */}
-        {cat.campos_ui.length > 0 && (
+        {/* Campos dinâmicos da categoria (campos_ui + colunas_texto, como o original) */}
+        {camposEspecificos.length > 0 && (
           <>
             <p className="text-xs text-slate-500 mt-4 mb-2">
               🎯 Filtros específicos para: <strong className="text-slate-400">{cat.name}</strong>
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {cat.campos_ui.map((campo) => (
+              {camposEspecificos.map((campo) => (
                 <div key={campo.id}>
                   <label className={labelCls}>{campo.label}</label>
                   {campo.tipo === "select" ? (
