@@ -2,6 +2,8 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 
+import SearchDetailsModal from "./SearchDetailsModal";
+
 /**
  * Pesquisa Interativa — espelho da "Consulta Detalhada" do painel original.
  *
@@ -124,10 +126,12 @@ function SearchCard({
   row,
   category,
   generalTerm,
+  onOpen,
 }: {
   row: SearchRow;
   category: Category;
   generalTerm: string;
+  onOpen: () => void;
 }) {
   const layout = category.layout_card || {};
   const dict = category.colunas_texto || {};
@@ -177,7 +181,19 @@ function SearchCard({
   const status = val("status_pagamento").toUpperCase();
 
   return (
-    <div className="rounded-xl bg-slate-900 border border-slate-800 border-l-4 border-l-emerald-500 p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/60">
+    <div
+      className="group cursor-pointer rounded-xl bg-slate-900 border border-slate-800 border-l-4 border-l-emerald-500 p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      aria-label="Ver detalhes do documento"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+    >
       {/* header */}
       <div className="flex items-start justify-between gap-2">
         <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
@@ -269,6 +285,13 @@ function SearchCard({
           })}
         </div>
       )}
+
+      {/* affordance de detalhes */}
+      <div className="mt-3 flex justify-end">
+        <span className="text-xs font-medium text-slate-500 transition-colors group-hover:text-emerald-400">
+          Ver detalhes →
+        </span>
+      </div>
     </div>
   );
 }
@@ -285,6 +308,10 @@ export default function Search() {
   const [yearTo, setYearTo] = useState(2026);
   const [municipality, setMunicipality] = useState("all");
   const [filters, setFilters] = useState<Record<string, string>>({});
+  const [detail, setDetail] = useState<{
+    row: SearchRow;
+    category: Category;
+  } | null>(null);
   const [general, setGeneral] = useState("");
   const [supplier, setSupplier] = useState("");
 
@@ -654,6 +681,7 @@ export default function Search() {
                     row={row}
                     category={cat}
                     generalTerm={general.trim()}
+                    onOpen={() => setDetail({ row, category: cat })}
                   />
                 ))}
               </div>
@@ -674,6 +702,17 @@ export default function Search() {
           Selecione os filtros e clique em <strong>Consultar</strong> para pesquisar nos 21
           tipos de documento.
         </p>
+      )}
+
+      {/* ---------- Modal de detalhes ---------- */}
+      {detail && (
+        <SearchDetailsModal
+          row={detail.row}
+          category={detail.category}
+          yearFrom={yearFrom}
+          municipality={municipality}
+          onClose={() => setDetail(null)}
+        />
       )}
     </div>
   );

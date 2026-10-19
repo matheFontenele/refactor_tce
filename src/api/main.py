@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 import duckdb
 import sqlglot
 import time as _time
+from functools import lru_cache
 from typing import Optional, List, Dict, Any
 
 try:  # pyarrow/requests existem na imagem Docker; dev local cai no modo parquet/seed
@@ -62,6 +63,12 @@ class SearchRequest(BaseModel):
     general_search: str = Field(default="", description="Busca geral (texto)")
     supplier_search: str = Field(default="", description="Fornecedor/CNPJ")
     limit: int = Field(default=500, le=500, description="Máximo de linhas")
+
+class SearchDetailsRequest(BaseModel):
+    category: str = Field(..., description="Categoria (chave no endpoints.json)")
+    row: Dict[str, Any] = Field(default_factory=dict, description="Linha do card (resultado da pesquisa)")
+    year_from: int = Field(default=2008, description="Ano base da pesquisa (restos a pagar: inclui anos futuros)")
+    municipality: str = Field(default="all", description="codigo_municipio ou 'all'")
 
 # ----------- Constants -----------
 
@@ -932,6 +939,243 @@ def search(req: SearchRequest):
         "fetched": fetched_now,
         "fetch_error": fetch_error,
         "fetch_pending": fetch_pending,
+    }
+
+
+# ---------- Detalhes do documento: relacionamentos ----------
+# Port de details_modal.py + motor_relacional.py do projeto original.
+
+def _normalizar_chave(valor: Any) -> str:
+    """Normaliza valores de chave (sem '.0' de floats), como no motor relacional."""
+    if valor is None:
+        return ""
+    s = str(valor).strip()
+    if s.lower() in ("none", "nan", "nat"):
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def _arquivos_modal(prefixo: str, ano_base: int, codigo_mun: str) -> List[str]:
+    """Arquivos do prefixo com ano >= ano_base (mantém futuros: restos a pagar).
+
+    Mesmo critério do original (obter_caminho_arquivos_modal), com pruning por
+    município e exclusão de parquets corrompidos já detectados.
+    """
+    code = "" if not codigo_mun or codigo_mun == "all" else _normalizar_chave(codigo_mun).zfill(3)
+    files = set()
+    for base in _parquet_dirs():
+        if code:
+            files.update(_glob.glob(os.path.join(base, f"{prefixo}_*_{code}.parquet")))
+        else:
+            files.update(_glob.glob(os.path.join(base, f"{prefixo}_*.parquet")))
+    validos = []
+    for arq in files:
+        m = _re.search(r"_(\d{4})(?:_|\.)", os.path.basename(arq))
+        if not m or int(m.group(1)) >= ano_base:
+            validos.append(arq)
+    return sorted(f for f in validos if f not in _BAD_PARQUET_FILES)
+
+
+# Tradutor universal de chaves ("camaleão"), como no original
+_KEY_ALTERNATIVAS = {
+    "numero_nota_empenho": ("numero_empenho",),
+    "numero_empenho": ("numero_nota_empenho",),
+    "numero_registro": ("codigo_renavam",),
+    "codigo_orgao": ("orgao",),
+}
+
+_DETAIL_MAX_ROWS = 200
+
+
+def _detalhes_relacionados(regra: dict, row: dict, files: List[str]) -> dict:
+    """Join dinâmico de uma seção de relacionamento (port de obter_dados_relacionados)."""
+    if not files:
+        return {"sucesso": False, "msg": "Bases não baixadas."}
+
+    conn = duckdb.connect()
+    try:
+        # 1. Colunas do alvo (o schema varia entre recortes/anos)
+        colunas_alvo: List[str] = []
+        while True:
+            if not files:
+                return {"sucesso": False, "msg": "Bases não baixadas."}
+            try:
+                desc = conn.execute(
+                    f"DESCRIBE SELECT * FROM {_read_parquet_sql(files)}"
+                ).fetchall()
+                colunas_alvo = [d[0] for d in desc]
+                break
+            except Exception as e:
+                bad = _bad_file_from_error(e)
+                if bad and bad in files:
+                    _BAD_PARQUET_FILES.add(bad)
+                    files = [f for f in files if f != bad]
+                    continue
+                return {"sucesso": False, "msg": f"Erro de banco: {e}"}
+
+        # 2. WHERE dinâmico a partir das chaves de join
+        clausulas: List[str] = []
+        params: List[Any] = []
+        for chave_origem in regra.get("chaves_join", []):
+            valor = _normalizar_chave(row.get(chave_origem))
+            # fallback numero_empenho <-> numero_nota_empenho (como no original)
+            if not valor and chave_origem == "numero_empenho":
+                valor = _normalizar_chave(row.get("numero_nota_empenho"))
+            elif not valor and chave_origem == "numero_nota_empenho":
+                valor = _normalizar_chave(row.get("numero_empenho"))
+            if not valor:
+                return {
+                    "sucesso": False,
+                    "msg": f"Linha atual não possui a chave '{chave_origem}'.",
+                }
+
+            chave_alvo = chave_origem
+            if chave_alvo not in colunas_alvo:
+                for alt in _KEY_ALTERNATIVAS.get(chave_origem, ()):
+                    if alt in colunas_alvo:
+                        chave_alvo = alt
+                        break
+                else:
+                    return {
+                        "sucesso": False,
+                        "msg": "A base alvo não possui a chave de ligação compatível.",
+                    }
+
+            # Compara como string (sem '.0') e como número (5 == '005'... via BIGINT)
+            clausulas.append(
+                f"(regexp_replace(CAST({chave_alvo} AS VARCHAR), '\\.0$', '') = ?"
+                f" OR TRY_CAST(regexp_replace(CAST({chave_alvo} AS VARCHAR), '\\.0$', '') AS BIGINT)"
+                f" = TRY_CAST(? AS BIGINT))"
+            )
+            params += [valor, valor]
+
+        # 3. Filtro de segurança por exercício (se o alvo tiver a coluna)
+        if "exercicio_orcamento" in colunas_alvo:
+            ano = _normalizar_chave(row.get("exercicio_orcamento"))
+            if ano:
+                clausulas.append("CAST(exercicio_orcamento AS VARCHAR) = ?")
+                params.append(ano)
+
+        where_sql = " AND ".join(clausulas) if clausulas else "1 = 1"
+
+        # 4. Executa (com retry em arquivo corrompido)
+        while True:
+            if not files:
+                return {"sucesso": False, "msg": "Bases não baixadas."}
+            try:
+                cur = conn.execute(
+                    f"SELECT * FROM {_read_parquet_sql(files)} WHERE {where_sql}", params
+                )
+                columns = [d[0] for d in cur.description]
+                raw_rows = cur.fetchall()
+                break
+            except Exception as e:
+                bad = _bad_file_from_error(e)
+                if bad and bad in files:
+                    _BAD_PARQUET_FILES.add(bad)
+                    files = [f for f in files if f != bad]
+                    continue
+                return {"sucesso": False, "msg": f"Erro de banco: {e}"}
+    finally:
+        conn.close()
+
+    if not raw_rows:
+        return {"sucesso": False, "msg": "Nenhum registro vinculado encontrado."}
+
+    colunas_exibicao = regra.get("colunas_exibicao", [])
+    campos = [c.get("campo") for c in colunas_exibicao if c.get("campo") in columns]
+    dicts = [dict(zip(columns, _serialize_row(r))) for r in raw_rows]
+    rows = [{c: d.get(c) for c in campos} for d in dicts[:_DETAIL_MAX_ROWS]]
+
+    soma_total = 0.0
+    for c in colunas_exibicao:
+        if c.get("tipo") == "moeda" and c.get("campo") in columns:
+            for d in dicts:
+                try:
+                    soma_total += float(d.get(c["campo"]) or 0)
+                except (TypeError, ValueError):
+                    pass
+
+    return {
+        "sucesso": True,
+        "titulo": regra.get("titulo_secao", ""),
+        "prefixo": regra.get("tabela_alvo_prefixo", ""),
+        "colunas_exibicao": colunas_exibicao,
+        "rows": rows,
+        "total_rows": len(raw_rows),
+        "truncated": len(raw_rows) > _DETAIL_MAX_ROWS,
+        "soma_total": soma_total,
+    }
+
+
+@lru_cache(maxsize=256)
+def _orgao_cached(cod_mun: str, exercicio: str, cod_orgao: str) -> str:
+    """Nome do órgão na API do TCE (cacheado; falha silenciosa como no original)."""
+    try:
+        import requests
+    except Exception:
+        return ""
+    url = "https://api-dados-abertos.tce.ce.gov.br/sim/orgaos"
+    params = {
+        "codigo_municipio": cod_mun,
+        "exercicio_orcamento": exercicio,
+        "$format": "json",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=5)
+        if resp.status_code == 200:
+            for el in resp.json().get("elements", []):
+                if str(el.get("codigo_orgao", "")).zfill(2) == cod_orgao:
+                    return (el.get("nome_orgao") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _buscar_nome_orgao(row: dict) -> str:
+    cod_mun = _normalizar_chave(row.get("codigo_municipio"))
+    exercicio = _normalizar_chave(row.get("exercicio_orcamento"))
+    cod_orgao = _normalizar_chave(row.get("codigo_orgao"))
+    if not (cod_mun and exercicio and cod_orgao):
+        return ""
+    return _orgao_cached(cod_mun.zfill(3), exercicio[:4] + "00", cod_orgao.zfill(2))
+
+
+@app.post("/api/search/details")
+def search_details(req: SearchDetailsRequest):
+    """Detalhes do documento: seções de vínculos via relacionamentos do endpoints.json.
+
+    Port do details_modal.py + motor_relacional.py: para cada regra de
+    relacionamento da categoria, faz o join dinâmico nos parquets locais
+    (ano base em diante — restos a pagar), com pruning por município.
+    """
+    cfg = _load_search_config()
+    cat = cfg["endpoints"].get(req.category)
+    if not cat:
+        raise HTTPException(status_code=404, detail=f"Categoria desconhecida: {req.category}")
+
+    relacionamentos = cat.get("relacionamentos") or []
+    if not relacionamentos:
+        return {"category": req.category, "sections": [], "nome_orgao": ""}
+
+    # Município: o código da própria linha é mais preciso que o filtro da busca
+    code = _normalizar_chave(req.row.get("codigo_municipio")) or req.municipality
+
+    sections = []
+    for regra in relacionamentos:
+        prefixo = regra.get("tabela_alvo_prefixo", "")
+        files = _arquivos_modal(prefixo, req.year_from, code)
+        resultado = _detalhes_relacionados(regra, req.row, files)
+        sections.append(
+            {**resultado, "titulo": regra.get("titulo_secao", prefixo), "prefixo": prefixo}
+        )
+
+    return {
+        "category": req.category,
+        "sections": sections,
+        "nome_orgao": _buscar_nome_orgao(req.row),
     }
 
 
