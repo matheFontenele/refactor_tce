@@ -21,6 +21,9 @@ data/cache/*
 .env
 .env.local
 
+# Agente local (regras de trabalho — uso pessoal, não versionar)
+AGENT.md
+
 # Build
 dist/
 build/
