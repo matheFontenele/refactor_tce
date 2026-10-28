@@ -89,6 +89,52 @@ Resposta da busca: `source` (`parquet`/`seed`), `fetched` (recortes baixados ago
 `fetch_error` (TCE indisponível) e `fetch_pending` (recortes restantes). O fetch só
 roda com município específico — nunca em "Todos".
 
+### Assistente IA em perfil de estudo (Ollama local limitado)
+
+Por padrão, o Ollama **não** inicia no servidor. Para testar a IA usando o Ollama
+em um container isolado, o perfil `ai-study` limita o serviço a **2 GiB de RAM**,
+**2 CPUs**, sem swap do container, uma geração/modelo por vez e contexto de 2048
+tokens. O limite é rígido: se o modelo exceder a memória, o container pode
+encerrar a inferência, em vez de consumir RAM sem limite no host.
+
+No `.env` do projeto, use um modelo menor para este servidor e a URL interna do
+serviço (os containers compartilham a rede Docker padrão):
+
+```dotenv
+OLLAMA_BASE_URL=http://ollama-study:11434
+OLLAMA_MODEL=qwen3:1.7b
+AI_MEMORY_LIMIT=768
+```
+
+Inicie apenas quando for estudar. O primeiro comando pode baixar a imagem Ollama;
+o `pull` do modelo também usa disco e rede:
+
+```bash
+docker compose --profile ai-study up -d ollama-study
+docker compose --profile ai-study exec ollama-study ollama pull qwen3:1.7b
+docker compose up -d --force-recreate api
+```
+
+Confira o consumo durante o teste:
+
+```bash
+docker stats --no-stream refactor_tce-api-1 tce-ollama-study
+free -h
+curl -s http://localhost:9001/api/ai/status
+```
+
+Para encerrar a inferência e liberar a memória do modelo:
+
+```bash
+docker compose --profile ai-study stop ollama-study
+```
+
+O modelo permanece no volume `ollama_study_models`, portanto não precisa ser
+baixado novamente. Não publicamos a porta 11434 no host: a API acessa o Ollama
+pela rede interna do Compose. Para voltar ao Ollama externo, remova/ajuste as
+variáveis `OLLAMA_BASE_URL`, `OLLAMA_MODEL` e `AI_MEMORY_LIMIT` no `.env` e
+recrie a API.
+
 ---
 
 ## Testes rápidos
