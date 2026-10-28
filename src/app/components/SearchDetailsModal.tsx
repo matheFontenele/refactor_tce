@@ -10,10 +10,19 @@
  *  - Relacionamentos de vínculos (POST /api/search/details -> motor relacional)
  *  - Todos os dados detalhados da linha
  *
- * O botão de dossiê em PDF (só em Notas de Empenho) ainda não foi portado.
+ * O endpoint e o payload permanecem inalterados.
  */
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
+import { Icon, IconName } from "./ui/Icon";
+import { Modal } from "./ui/Modal";
+import {
+  TableShell,
+  tableClass,
+  tdClass,
+  thClass,
+} from "./ui/Table";
+import { cx } from "./ui/cx";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
@@ -77,10 +86,10 @@ function fmtDate(v: unknown): string {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(v);
 }
 
-const META_ICONS: Record<string, string> = {
-  local: "📍",
-  data: "📅",
-  valor: "💰",
+const META_ICONS: Record<string, IconName> = {
+  local: "mapPin",
+  data: "calendar",
+  valor: "coins",
 };
 
 const val = (v: unknown): string =>
@@ -104,24 +113,32 @@ function RelatedSectionView({ sec }: { sec: RelatedSection }) {
   const rows = sec.rows || [];
 
   return (
-    <div className="rounded-xl bg-slate-950/40 border border-slate-800 p-4">
-      <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500">
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
         {sec.titulo}
       </h4>
 
       {!sec.sucesso ? (
-        <p className="mt-2 text-xs text-slate-500">⚠️ {sec.msg}</p>
+        <p className="mt-2 flex items-start gap-2 text-xs text-slate-300">
+          <Icon
+            name="alertTriangle"
+            className="mt-px h-3.5 w-3.5 shrink-0 text-amber-300"
+          />
+          {sec.msg}
+        </p>
       ) : (
         <>
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-sm">
+          <TableShell className="mt-2">
+            <table className={tableClass}>
+              <caption className="sr-only">
+                {sec.titulo}: {rows.length} registro
+                {rows.length === 1 ? "" : "s"} exibido
+                {rows.length === 1 ? "" : "s"}
+              </caption>
               <thead>
-                <tr className="border-b border-slate-800">
+                <tr>
                   {cols.map((c) => (
-                    <th
-                      key={c.campo}
-                      className="px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-wide text-slate-500"
-                    >
+                    <th key={c.campo} scope="col" className={thClass}>
                       {c.label}
                     </th>
                   ))}
@@ -145,11 +162,12 @@ function RelatedSectionView({ sec }: { sec: RelatedSection }) {
                       return (
                         <td
                           key={c.campo}
-                          className={`px-2 py-1.5 text-slate-300 ${
+                          className={cx(
+                            tdClass,
                             tipo === "moeda"
                               ? "text-right font-mono tabular-nums"
-                              : ""
-                          }`}
+                              : "",
+                          )}
                         >
                           {display || "—"}
                         </td>
@@ -159,23 +177,23 @@ function RelatedSectionView({ sec }: { sec: RelatedSection }) {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableShell>
 
-          {(sec.total_rows || 0) > rows.length && (
-            <p className="mt-1 text-[11px] text-slate-500">
+          {(sec.total_rows || 0) > rows.length ? (
+            <p className="mt-1 text-xs text-slate-400">
               +{(sec.total_rows || 0) - rows.length} registros (mostrando os
               primeiros {rows.length})
             </p>
-          )}
+          ) : null}
 
-          {(sec.soma_total || 0) > 0 && (
-            <p className="mt-2 text-xs text-slate-400">
-              Soma Total:{" "}
-              <strong className="text-emerald-400">
+          {(sec.soma_total || 0) > 0 ? (
+            <p className="mt-2 text-xs text-slate-300">
+              Soma total:{" "}
+              <strong className="font-semibold text-emerald-300">
                 {brl(sec.soma_total || 0)}
               </strong>
             </p>
-          )}
+          ) : null}
         </>
       )}
     </div>
@@ -192,22 +210,7 @@ export default function SearchDetailsModal({
   const [data, setData] = useState<DetailsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  // Esc fecha + trava scroll do body
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    panelRef.current?.focus();
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [onClose]);
+  const titleId = useId();
 
   // Vínculos (relacionamentos do endpoints.json) — motor relacional no backend
   useEffect(() => {
@@ -281,163 +284,205 @@ export default function SearchDetailsModal({
     loading || !!error || (data?.sections.length ?? 0) > 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
-      onClick={onClose}
-      role="presentation"
+    <Modal
+      onClose={onClose}
+      labelledBy={titleId}
+      className="max-w-5xl"
     >
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Detalhes do documento"
-        tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl shadow-slate-950/80 focus:outline-none"
-      >
-        {/* Cabeçalho */}
-        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-800 bg-slate-900/95 px-5 py-4 backdrop-blur">
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
-              📋 Detalhes do Documento
-            </p>
-            <h2 className="mt-1 text-lg font-extrabold text-slate-100">
-              {titulo ? `${category.name.toUpperCase()} — ${titulo}` : category.name.toUpperCase()}
-            </h2>
-            <p className="mt-1 text-xs text-slate-400">
-              📍 {municipioNome} — Exercício: {exercicio}
-              {tituloGrande ? ` | ${tituloGrande}` : ""}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Fechar detalhes"
-            className="shrink-0 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-sm text-slate-300 transition-colors hover:bg-slate-700 hover:text-slate-100"
+      {/* Cabeçalho */}
+      <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-800 bg-slate-900/95 px-5 py-4 backdrop-blur">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+            <Icon name="fileText" className="h-3.5 w-3.5" />
+            Detalhes do documento
+          </p>
+          <h2
+            id={titleId}
+            className="mt-1 break-words text-lg font-bold text-slate-50"
           >
-            ✕
-          </button>
+            {titulo
+              ? `${category.name.toUpperCase()} — ${titulo}`
+              : category.name.toUpperCase()}
+          </h2>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-300">
+            <span className="inline-flex items-center gap-1">
+              <Icon name="mapPin" className="h-3.5 w-3.5" />
+              {municipioNome}
+            </span>
+            <span className="text-slate-500" aria-hidden>
+              ·
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Icon name="calendar" className="h-3.5 w-3.5" />
+              Exercício: {exercicio}
+            </span>
+            {tituloGrande ? (
+              <>
+                <span className="text-slate-500" aria-hidden>
+                  ·
+                </span>
+                <span>{tituloGrande}</span>
+              </>
+            ) : null}
+          </p>
         </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Fechar detalhes"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 transition-colors hover:bg-slate-700 hover:text-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+        >
+          <Icon name="x" className="h-5 w-5" />
+        </button>
+      </div>
 
-        <div className="space-y-5 p-5">
-          {/* 2. Informações Principais */}
-          {metadados.length > 0 && (
-            <section>
-              <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                📄 Informações Principais
-              </h3>
-              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {metadados.map((m) => {
-                  const tipo = (m.tipo || "texto").toLowerCase();
-                  const display = formatMeta(row[m.coluna], tipo);
-                  return (
-                    <div
-                      key={m.coluna}
-                      className="rounded-lg border border-slate-800 bg-slate-800/50 p-3"
-                    >
-                      <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                        {META_ICONS[tipo] || "✏️"} {m.label}
-                      </div>
-                      <div
-                        className={`mt-1 text-sm ${
-                          display ? "text-slate-200" : "text-slate-500"
-                        }`}
-                      >
-                        {display || "Não informado"}
-                      </div>
+      <div className="space-y-5 p-5">
+        {/* Informações Principais */}
+        {metadados.length > 0 ? (
+          <section>
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <Icon name="fileText" className="h-3.5 w-3.5" />
+              Informações principais
+            </h3>
+            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {metadados.map((m) => {
+                const tipo = (m.tipo || "texto").toLowerCase();
+                const display = formatMeta(row[m.coluna], tipo);
+                return (
+                  <div
+                    key={m.coluna}
+                    className="rounded-lg border border-slate-800 bg-slate-800/50 p-3"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                      <Icon
+                        name={META_ICONS[tipo] || "fileText"}
+                        className="h-3.5 w-3.5"
+                      />
+                      {m.label}
                     </div>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+                    <div
+                      className={cx(
+                        "mt-1 text-sm",
+                        display ? "text-slate-200" : "text-slate-400",
+                      )}
+                    >
+                      {display || "Não informado"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
 
-          {/* 3. Informações de Orçamento */}
-          {codOrgao && codMun && (
-            <section>
-              <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                🏛️ Informações de Orçamento
-              </h3>
-              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="rounded-lg border border-slate-800 bg-slate-800/50 p-3">
-                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                    Unidade Gestora
-                  </div>
-                  <div className="mt-1 text-sm text-slate-200">
-                    {municipioNome} - U.O. {unidade || "—"}
-                  </div>
+        {/* Informações de Orçamento */}
+        {codOrgao && codMun ? (
+          <section>
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <Icon name="landmark" className="h-3.5 w-3.5" />
+              Informações de orçamento
+            </h3>
+            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-slate-800 bg-slate-800/50 p-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Unidade gestora
                 </div>
-                <div className="rounded-lg border border-slate-800 bg-slate-800/50 p-3">
-                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                    Órgão
-                  </div>
-                  <div className="mt-1 text-sm text-slate-200">
-                    <span className="font-mono text-slate-400">{codOrgao}</span>
-                    {" — "}
-                    {loading
-                      ? "…"
-                      : data?.nome_orgao || "Não identificado"}
-                  </div>
+                <div className="mt-1 text-sm text-slate-200">
+                  {municipioNome} - U.O. {unidade || "—"}
                 </div>
               </div>
-            </section>
-          )}
-
-          {/* 4. Descrição dinâmica */}
-          {descPartes.length > 0 && (
-            <section>
-              <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                📜 {descLabel}
-              </h3>
-              <div className="mt-2 rounded-lg border-l-2 border-emerald-500/60 bg-slate-800/50 p-3 text-sm leading-relaxed text-slate-300">
-                {descPartes.map((p, i) => (
-                  <span key={i}>
-                    {i > 0 && " — "}
-                    {p.label && (
-                      <strong className="text-slate-200">{p.label}: </strong>
-                    )}
-                    {p.value}
-                  </span>
-                ))}
+              <div className="rounded-lg border border-slate-800 bg-slate-800/50 p-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Órgão
+                </div>
+                <div className="mt-1 text-sm text-slate-200">
+                  <span className="font-mono text-slate-300">{codOrgao}</span>
+                  {" — "}
+                  {loading ? "…" : data?.nome_orgao || "Não identificado"}
+                </div>
               </div>
-            </section>
-          )}
+            </div>
+          </section>
+        ) : null}
 
-          {/* 5. Relacionamentos de Vínculos */}
-          {mostrarRelacionamentos && (
-            <section>
-              <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                📊 Relacionamentos de Vínculos
-              </h3>
-              <div className="mt-2 space-y-3">
-                {loading && (
-                  <p className="animate-pulse text-sm text-slate-500">
-                    Carregando vínculos…
-                  </p>
-                )}
-                {error && (
-                  <div className="rounded-lg border border-rose-800 bg-rose-950/60 p-3 text-sm text-rose-200">
-                    Não foi possível carregar os vínculos: {error}
-                  </div>
-                )}
-                {data?.sections.map((sec) => (
-                  <RelatedSectionView key={sec.titulo} sec={sec} />
-                ))}
-              </div>
-            </section>
-          )}
+        {/* Descrição dinâmica */}
+        {descPartes.length > 0 ? (
+          <section>
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <Icon name="fileText" className="h-3.5 w-3.5" />
+              {descLabel}
+            </h3>
+            <div className="mt-2 rounded-lg border-l-2 border-emerald-500/60 bg-slate-800/50 p-3 text-sm leading-relaxed text-slate-300">
+              {descPartes.map((p, i) => (
+                <span key={i}>
+                  {i > 0 ? " — " : null}
+                  {p.label ? (
+                    <strong className="font-medium text-slate-200">
+                      {p.label}:{" "}
+                    </strong>
+                  ) : null}
+                  {p.value}
+                </span>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
-          {/* 6. Todos os dados detalhados */}
-          {rawEntries.length > 0 && (
-            <details className="rounded-xl border border-slate-800 bg-slate-950/40">
-              <summary className="cursor-pointer select-none px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500 transition-colors hover:text-slate-300">
-                🛠️ Ver Todos os Dados Detalhados
-              </summary>
-              <div className="border-t border-slate-800 p-3">
-                <table className="w-full text-sm">
+        {/* Relacionamentos de Vínculos */}
+        {mostrarRelacionamentos ? (
+          <section>
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <Icon name="barChart" className="h-3.5 w-3.5" />
+              Relacionamentos de vínculos
+            </h3>
+            <div className="mt-2 space-y-3">
+              {loading ? (
+                <p
+                  role="status"
+                  className="flex items-center gap-2 text-sm text-slate-300"
+                >
+                  <Icon
+                    name="loader"
+                    className="h-4 w-4 animate-spin text-emerald-300"
+                  />
+                  Carregando vínculos…
+                </p>
+              ) : null}
+              {error ? (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-lg border border-rose-800 bg-rose-950/60 p-3 text-sm text-rose-200"
+                >
+                  <Icon
+                    name="alertTriangle"
+                    className="mt-0.5 h-4 w-4 shrink-0"
+                  />
+                  Não foi possível carregar os vínculos: {error}
+                </div>
+              ) : null}
+              {data?.sections.map((sec) => (
+                <RelatedSectionView key={sec.titulo} sec={sec} />
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {/* Todos os dados detalhados */}
+        {rawEntries.length > 0 ? (
+          <details className="rounded-xl border border-slate-800 bg-slate-950/40">
+            <summary className="flex cursor-pointer select-none items-center gap-2 rounded-lg px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400 transition-colors hover:text-slate-200">
+              <Icon name="database" className="h-3.5 w-3.5" />
+              Ver todos os dados detalhados
+            </summary>
+            <div className="border-t border-slate-800 p-3">
+              <TableShell>
+                <table className={tableClass}>
+                  <caption className="sr-only">
+                    Todos os campos disponíveis para este documento
+                  </caption>
                   <tbody>
                     {rawEntries.map(([k, vv]) => {
-                      const friendly =
-                        dict[k] || k.replace(/_/g, " ");
+                      const friendly = dict[k] || k.replace(/_/g, " ");
                       const lower = k.toLowerCase();
                       const display =
                         lower.includes("valor") && typeof vv === "number"
@@ -450,22 +495,23 @@ export default function SearchDetailsModal({
                           key={k}
                           className="border-b border-slate-800/60 last:border-0"
                         >
-                          <td className="w-1/3 px-2 py-1.5 font-semibold text-slate-500">
+                          <th
+                            scope="row"
+                            className="w-1/3 px-3 py-2 text-left text-sm font-medium text-slate-400"
+                          >
                             {friendly}
-                          </td>
-                          <td className="px-2 py-1.5 text-slate-300">
-                            {display}
-                          </td>
+                          </th>
+                          <td className={tdClass}>{display}</td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
-              </div>
-            </details>
-          )}
-        </div>
+              </TableShell>
+            </div>
+          </details>
+        ) : null}
       </div>
-    </div>
+    </Modal>
   );
 }
