@@ -23,9 +23,7 @@ import {
   thClass,
 } from "./ui/Table";
 import { cx } from "./ui/cx";
-
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
+import { getApiUrl } from "../lib/api";
 
 interface LayoutCard {
   topo_esq?: string;
@@ -219,7 +217,7 @@ export default function SearchDetailsModal({
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`${API_URL}/api/search/details`, {
+        const res = await fetch(`${getApiUrl()}/api/search/details`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

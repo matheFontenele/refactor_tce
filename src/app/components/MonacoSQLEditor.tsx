@@ -15,6 +15,7 @@ import {
   thClass,
 } from "./ui/Table";
 import { cx } from "./ui/cx";
+import { getApiUrl } from "../lib/api";
 
 /**
  * SQL Studio — Monaco Editor + FastAPI backend
@@ -32,9 +33,6 @@ import { cx } from "./ui/cx";
  *
  * O endpoint, os guardrails e o payload permanecem inalterados.
  */
-
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
 
 const PAGE_SIZE = 50;
 
@@ -77,7 +75,7 @@ export default function MonacoSQLEditor() {
   // ---- Catálogo (FR-002) ----
   const loadCatalog = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/sql/catalog`, {
+      const res = await fetch(`${getApiUrl()}/api/sql/catalog`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -112,7 +110,7 @@ export default function MonacoSQLEditor() {
 
     const startedAt = new Date();
     try {
-      const res = await fetch(`${API_URL}/api/sql/execute`, {
+      const res = await fetch(`${getApiUrl()}/api/sql/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sql, max_rows: 5000, timeout: 30 }),
@@ -306,7 +304,7 @@ export default function MonacoSQLEditor() {
       <PageHeader
         eyebrow="Análise"
         title="SQL Studio"
-        description={`Editor SQL com guardrails de leitura. Ctrl+Enter executa. API: ${API_URL}`}
+        description="Editor SQL com guardrails de leitura. Ctrl+Enter executa."
         actions={
           <Button
             variant="primary"

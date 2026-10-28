@@ -16,6 +16,14 @@ services:
       - CACHE_PARQUET_DIR=/cache
       - TCE_FETCH_BUDGET_SECONDS=120
       - TCE_FETCH_MAX_RECORTES=24
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://172.16.0.200:3001}
+      # Assistente IA: LLM local (tce-ollama-local na rede do projeto original)
+      - OLLAMA_BASE_URL=http://tce-ollama-local:11434
+      - OLLAMA_MODEL=qwen3:4b
+      - AI_CATEGORIES=notas_empenho,notas_fiscais,liquidacoes
+    networks:
+      - default
+      - ollama
     volumes:
       - ./data:/data:ro
       # Dataset real do TCE (read-only). Defina PARQUET_SOURCE no .env.
@@ -48,7 +56,9 @@ services:
       - "3001:3000"
     environment:
       - API_URL=http://api:8000
-      - NEXT_PUBLIC_API_URL=http://localhost:9001
+      # Sem valor fixo: o frontend usa o mesmo host acessado pelo navegador.
+      # Pode ser sobrescrito por DNS/reverse proxy via .env.
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
     depends_on:
       api:
         condition: service_started
@@ -78,6 +88,13 @@ services:
       - ollama_models:/root/.ollama:rw
     profiles:
       - ai
+
+networks:
+  # Rede do projeto original, onde o tce-ollama-local está conectado.
+  # Se o Ollama rodar em outro host, sobrescreva OLLAMA_BASE_URL no .env.
+  ollama:
+    external: true
+    name: ${OLLAMA_NETWORK:-automacao_api_tse_default}
 
 volumes:
   data:

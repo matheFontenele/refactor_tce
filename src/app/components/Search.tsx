@@ -23,6 +23,7 @@ import {
   thClass,
 } from "./ui/Table";
 import { cx } from "./ui/cx";
+import { getApiUrl } from "../lib/api";
 
 /**
  * Pesquisa Interativa — espelho da "Consulta Detalhada" do painel original.
@@ -33,9 +34,6 @@ import { cx } from "./ui/cx";
  *
  * O payload enviado a POST /api/search permanece idêntico ao original.
  */
-
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
 
 interface CampoUI {
   id: string;
@@ -415,7 +413,7 @@ export default function Search() {
   const loadConfig = useCallback(async () => {
     setCfgError(null);
     try {
-      const res = await fetch(`${API_URL}/api/search/config`);
+      const res = await fetch(`${getApiUrl()}/api/search/config`);
       if (!res.ok) throw new Error(`Erro HTTP ${res.status}`);
       const data = (await res.json()) as SearchConfig;
       setConfig(data);
@@ -472,7 +470,7 @@ export default function Search() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/search`, {
+      const res = await fetch(`${getApiUrl()}/api/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -17,6 +17,7 @@ import { ErrorState } from "./ui/State";
 import { Icon, IconName } from "./ui/Icon";
 import { TableShell, tableClass, tdClass, thClass } from "./ui/Table";
 import { cx } from "./ui/cx";
+import { getApiUrl } from "../lib/api";
 
 /**
  * Dashboard — KPI cards + gráficos.
@@ -27,9 +28,6 @@ import { cx } from "./ui/cx";
  * - by_municipality: [{municipality, records, value}]
  * - by_document_type: [{type, records, value}]
  */
-
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
 
 interface Stats {
   totals: {
@@ -222,7 +220,7 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/dashboard/stats`);
+      const res = await fetch(`${getApiUrl()}/api/dashboard/stats`);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || `Erro HTTP ${res.status}`);

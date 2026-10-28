@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "./ui/Icon";
+import { getApiUrl } from "../lib/api";
 
 /**
  * Assistente de Dados — chat Text-to-SQL sobre os Parquets reais do TCE-CE.
@@ -15,9 +16,6 @@ import { Icon } from "./ui/Icon";
  * - O modelo roda localmente: pode levar 1–2 min. Mostramos estágio + tempo
  *   decorrido para que a espera não pareça travamento.
  */
-
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001";
 
 const MAX_ROWS = 200;
 
@@ -447,7 +445,7 @@ export default function AssistantChat() {
     let alive = true;
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/ai/status`);
+        const res = await fetch(`${getApiUrl()}/api/ai/status`);
         if (!res.ok) return;
         const data = (await res.json()) as AiStatus;
         if (alive) setStatus(data);
@@ -622,7 +620,7 @@ export default function AssistantChat() {
       setNow(Date.now());
 
       try {
-        const res = await fetch(`${API_URL}/api/ai/stream`, {
+        const res = await fetch(`${getApiUrl()}/api/ai/stream`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
