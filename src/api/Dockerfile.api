@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy application code
-COPY main.py tce_client.py /app/
+COPY main.py tce_client.py ai.py ai_db.py /app/
 
 # NOTE: DuckDB database is mounted as read-only volume at /data/tce_analysis.duckdb
 # The data volume is created and populated outside this container
