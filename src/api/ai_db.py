@@ -11,7 +11,9 @@ gravável. Ainda assim, o executor da IA deve rodar apenas SQL pré-validado
 Variáveis de ambiente (com defaults seguros):
   AI_CATEGORIES       prefixos separados por vírgula
                       (default: notas_empenho,notas_fiscais,liquidacoes)
-  PARQUET_DIR         dataset real (default /parquet)
+  LAKEHOUSE_SOURCE    raiz do lakehouse manifest-gated (default /lakehouse);
+                      quando o prefixo existe lá, ele é a fonte autoritativa
+  PARQUET_DIR         dataset legado, só para prefixos fora do lakehouse
   CACHE_PARQUET_DIR   cache sob demanda (default <repo>/data/cache)
   AI_MEMORY_LIMIT     limite do DuckDB em MB (default 1536)
   AI_TEMP_DIR         diretório de spill (default /tmp/duckdb_ai)
@@ -30,6 +32,11 @@ import time
 from typing import Iterable, Optional
 
 import duckdb
+
+try:  # fonte principal com gate de manifesto
+    from lakehouse import get_lakehouse
+except Exception:  # pragma: no cover - dev sem o módulo
+    get_lakehouse = None  # type: ignore[assignment]
 
 DEFAULT_CATEGORIES = ("notas_empenho", "notas_fiscais", "liquidacoes")
 
@@ -87,8 +94,21 @@ class AiDatabase:
 
     # ---------------- inventário ----------------
 
+    def _lakehouse(self):
+        if get_lakehouse is None:
+            return None
+        try:
+            return get_lakehouse()
+        except Exception:
+            return None
+
     def _list_files(self, prefix: str) -> list[str]:
-        """Parquets do prefixo, deduplicados por nome (primeiro diretório vence)."""
+        """Parquets validados do lakehouse; senão, fallback legado por glob."""
+        lh = self._lakehouse()
+        if lh is not None and lh.has_prefix(prefix):
+            # O lakehouse já validou sha256/row_count/columns e é autoritativo.
+            return lh.files(prefix, 0, 9999, "all")
+
         vistos: set[str] = set()
         arquivos: list[str] = []
         for base in self.parquet_dirs:
@@ -141,7 +161,10 @@ class AiDatabase:
             self._views[prefix] = arquivos
 
     def refresh(self) -> None:
-        """Relê o data lake (novos parquets) e recria as views."""
+        """Relê o data lake (novos manifestos/parquets) e recria as views."""
+        lh = self._lakehouse()
+        if lh is not None:
+            lh.refresh()
         with self._lock:
             self._refresh_views()
 

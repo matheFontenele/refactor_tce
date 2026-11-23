@@ -1,6 +1,6 @@
 """FastAPI backend for SQL Studio with Monaco Editor."""
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -14,6 +14,11 @@ try:  # pyarrow/requests existem na imagem Docker; dev local cai no modo parquet
     import tce_client as _tce
 except Exception:  # pragma: no cover
     _tce = None
+
+try:  # lakehouse é a fonte principal; o modo seed/legado continua como fallback
+    import lakehouse as _lakehouse_mod
+except Exception:  # pragma: no cover
+    _lakehouse_mod = None
 
 app = FastAPI(title="SQL Studio API", version="0.1.0")
 
@@ -442,7 +447,11 @@ def ai_status():
 # ----------- Dashboard -----------
 
 @app.get("/api/dashboard/stats")
-def dashboard_stats():
+def dashboard_stats(
+    year: Optional[int] = Query(default=None),
+    municipality: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+):
     """Agregações para o Dashboard (KPI cards + gráficos).
 
     Contrato:
@@ -464,6 +473,14 @@ def dashboard_stats():
         ]
         tables.sort()
 
+        # Filtros usam somente nomes de tabelas presentes no catálogo do DuckDB.
+        # A API atualmente agrega o seed relacional; os Parquets são consumidos
+        # pela Pesquisa e pelo Assistente, não por este endpoint.
+        if category and category != "all":
+            if category not in tables:
+                raise HTTPException(status_code=400, detail="Tipo de documento inválido")
+            tables = [category]
+
         if not tables:
             return {
                 "totals": {"records": 0, "value": 0.0, "tables": 0, "municipalities": 0},
@@ -473,8 +490,16 @@ def dashboard_stats():
             }
 
         # Totals — uma única query com UNION ALL
+        filters = []
+        if year is not None:
+            filters.append(f"exercicio_orcamento = {int(year)}")
+        if municipality and municipality != "all":
+            safe_municipality = municipality.replace("'", "''")
+            filters.append(f"municipio_referencia = '{safe_municipality}'")
+        where_sql = " WHERE " + " AND ".join(filters) if filters else ""
+
         count_parts = " UNION ALL ".join(
-            f"SELECT COUNT(*) AS cnt, COALESCE(SUM(valor), 0) AS val FROM \"{t}\""
+            f"SELECT COUNT(*) AS cnt, COALESCE(SUM(valor), 0) AS val FROM \"{t}\"{where_sql}"
             for t in tables
         )
         recs, val = conn.execute(
@@ -483,7 +508,7 @@ def dashboard_stats():
 
         # Municípios distintos
         muni_parts = " UNION ALL ".join(
-            f"SELECT DISTINCT municipio_referencia AS m FROM \"{t}\"" for t in tables
+            f"SELECT DISTINCT municipio_referencia AS m FROM \"{t}\"{where_sql}" for t in tables
         )
         muni_count = conn.execute(
             f"SELECT COUNT(DISTINCT m) FROM ({muni_parts}) WHERE m IS NOT NULL"
@@ -491,7 +516,7 @@ def dashboard_stats():
 
         # by_year
         year_parts = " UNION ALL ".join(
-            f"SELECT exercicio_orcamento AS y, 1 AS c, COALESCE(valor, 0) AS v FROM \"{t}\""
+            f"SELECT exercicio_orcamento AS y, 1 AS c, COALESCE(valor, 0) AS v FROM \"{t}\"{where_sql}"
             for t in tables
         )
         by_year = [
@@ -504,7 +529,7 @@ def dashboard_stats():
 
         # by_municipality
         muni_parts2 = " UNION ALL ".join(
-            f"SELECT municipio_referencia AS m, 1 AS c, COALESCE(valor, 0) AS v FROM \"{t}\""
+            f"SELECT municipio_referencia AS m, 1 AS c, COALESCE(valor, 0) AS v FROM \"{t}\"{where_sql}"
             for t in tables
         )
         by_municipality = [
@@ -517,7 +542,7 @@ def dashboard_stats():
 
         # by_document_type (uma contagem por tabela)
         dt_parts = " UNION ALL ".join(
-            f"SELECT '{t}' AS tp, COUNT(*) AS c, COALESCE(SUM(valor), 0) AS v FROM \"{t}\""
+            f"SELECT '{t}' AS tp, COUNT(*) AS c, COALESCE(SUM(valor), 0) AS v FROM \"{t}\"{where_sql}"
             for t in tables
         )
         by_document_type = [
@@ -528,6 +553,7 @@ def dashboard_stats():
         ]
 
         return {
+            "source": "seed",
             "totals": {
                 "records": int(recs),
                 "value": float(val),
@@ -625,18 +651,36 @@ def _serialize_row(row):
     return out
 
 
+def _lakehouse():
+    """Lakehouse montado (manifest-gated), se configurado e disponível."""
+    if _lakehouse_mod is None:
+        return None
+    try:
+        return _lakehouse_mod.get_lakehouse()
+    except Exception:
+        return None
+
+
 def _parquet_dirs():
-    """Data lake local: dataset real (ro) + cache gravável de recortes sob demanda."""
+    """Fontes legadas: dataset real antigo (ro) + cache de recortes sob demanda.
+
+    Usadas apenas para prefixos que o lakehouse ainda não publica.
+    """
     return [d for d in (PARQUET_DIR, CACHE_PARQUET_DIR) if d and os.path.isdir(d)]
 
 
 def _parquet_files(prefixo: str, year_from: int, year_to: int, municipality: str):
-    """Lista arquivos parquet com pruning por nome (ano/município).
+    """Lista parquets do recorte, priorizando o lakehouse.
 
-    O dataset real é particionado no nome: {prefixo}_{ano}_{mes}[_{codigo}].parquet
-    — filtrar pelo glob evita abrir os 31k arquivos.
-    Arquivos corrompidos já detectados são excluídos.
+    Lakehouse: descoberta por manifesto + validação de sha256/row_count/columns
+    (ver ``lakehouse.py`` e o contrato no README). Se o endpoint já existe no
+    lakehouse, só ele é usado — nunca misturamos com o dataset antigo/cache.
+    Prefixos ainda não publicados lá caem no glob legado por nome.
     """
+    lh = _lakehouse()
+    if lh is not None and lh.has_prefix(prefixo):
+        return lh.files(prefixo, year_from, year_to, municipality)
+
     files = set()
     for base in _parquet_dirs():
         for ano in range(year_from, year_to + 1):
@@ -651,7 +695,10 @@ def _parquet_files(prefixo: str, year_from: int, year_to: int, municipality: str
 
 
 def _prefix_has_files(prefixo: str) -> bool:
-    """Existe qualquer arquivo do prefixo no data lake local (o seed é último recurso)?"""
+    """Existe fonte para o prefixo (lakehouse ou dataset legado)? O seed é último recurso."""
+    lh = _lakehouse()
+    if lh is not None and lh.has_prefix(prefixo):
+        return True
     return any(
         _glob.glob(os.path.join(base, f"{prefixo}_*.parquet"))
         for base in _parquet_dirs()
@@ -694,11 +741,19 @@ def _resolve_source(cat: dict, prefixo: str, req: "SearchRequest", cfg: dict):
     faltante. TCE fora do ar → serve o que existe local; nunca falha por rede.
     Retorna (file_list | None, fetched, fetch_error, fetch_pending).
     """
+    lh = _lakehouse()
+    lakehouse_owns = lh is not None and lh.has_prefix(prefixo)
+
     file_list = (
         _parquet_files(prefixo, req.year_from, req.year_to, req.municipality)
         if _prefix_has_files(prefixo)
         else None
     )
+
+    # Lakehouse é a fonte autoritativa do endpoint: não baixar recortes para o
+    # cache antigo (misturaria schemas/origens e furaria o gate de manifesto).
+    if lakehouse_owns:
+        return file_list, [], None, 0
 
     fetched, fetch_error, pending = [], None, 0
     munis = {

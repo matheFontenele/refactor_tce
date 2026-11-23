@@ -30,6 +30,7 @@ import { getApiUrl } from "../lib/api";
  */
 
 interface Stats {
+  source?: "seed" | "parquet";
   totals: {
     records: number;
     value: number;
@@ -61,6 +62,9 @@ const compact = (n: number) =>
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(n);
+
+const documentLabel = (value: string) =>
+  value.replaceAll("_", " ").replace(/^./, (char) => char.toUpperCase());
 
 // Paleta categórica — cores distintas, usadas apenas como reforço do rótulo.
 const BAR_COLORS = [
@@ -212,6 +216,10 @@ function KpiCard({
 
 export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [filterOptions, setFilterOptions] = useState<Stats | null>(null);
+  const [year, setYear] = useState("all");
+  const [municipality, setMunicipality] = useState("all");
+  const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [metric, setMetric] = useState<Metric>("records");
@@ -220,19 +228,28 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${getApiUrl()}/api/dashboard/stats`);
+      const params = new URLSearchParams();
+      if (year !== "all") params.set("year", year);
+      if (municipality !== "all") params.set("municipality", municipality);
+      if (category !== "all") params.set("category", category);
+      const queryString = params.toString();
+      const query = queryString ? `?${queryString}` : "";
+      const res = await fetch(`${getApiUrl()}/api/dashboard/stats${query}`);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || `Erro HTTP ${res.status}`);
       }
       const data = (await res.json()) as Stats;
       setStats(data);
+      if (!filterOptions) {
+        setFilterOptions(year === "all" && municipality === "all" && category === "all" ? data : null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [year, municipality, category, filterOptions]);
 
   useEffect(() => {
     load();
@@ -283,6 +300,7 @@ export default function Dashboard() {
   if (!stats) return null;
 
   const { totals, by_year, by_municipality, by_document_type } = stats;
+  const options = filterOptions || stats;
   const topMunicipios = by_municipality.slice(0, 8);
   const tipos = by_document_type.slice(0, 10);
 
@@ -301,9 +319,9 @@ export default function Dashboard() {
       tone: "emerald",
     },
     {
-      label: "Valor total",
+      label: "Valor registrado",
       value: brl(totals.value),
-      hint: "Soma dos valores registrados",
+      hint: "Soma do campo genérico valor",
       icon: "coins",
       tone: "sky",
     },
@@ -334,8 +352,50 @@ export default function Dashboard() {
       <PageHeader
         eyebrow="Visão geral"
         title="Dashboard"
-        description="Panorama consolidado dos documentos fiscais disponíveis na base local."
+        description="Explore os registros por exercício, município e tipo de documento."
       />
+
+      <Card className="p-4 sm:p-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-slate-100">Recorte da análise</p>
+            <p className="mt-1 text-xs text-slate-400">Os indicadores e gráficos seguem os filtros selecionados.</p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <label className="grid gap-1 text-xs font-medium text-slate-300">
+              Exercício
+              <select aria-label="Filtrar por exercício" value={year} onChange={(e) => setYear(e.target.value)} className="min-h-11 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+                <option value="all">Todos os exercícios</option>
+                {options.by_year.map((row) => <option key={row.year} value={row.year}>{row.year}</option>)}
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-slate-300">
+              Município
+              <select aria-label="Filtrar por município" value={municipality} onChange={(e) => setMunicipality(e.target.value)} className="min-h-11 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+                <option value="all">Todos os municípios</option>
+                {options.by_municipality.map((row) => <option key={row.municipality} value={row.municipality}>{row.municipality}</option>)}
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-slate-300">
+              Tipo de documento
+              <select aria-label="Filtrar por tipo de documento" value={category} onChange={(e) => setCategory(e.target.value)} className="min-h-11 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+                <option value="all">Todos os tipos</option>
+                {options.by_document_type.map((row) => <option key={row.type} value={row.type}>{documentLabel(row.type)}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+        {(year !== "all" || municipality !== "all" || category !== "all") && (
+          <button type="button" onClick={() => { setYear("all"); setMunicipality("all"); setCategory("all"); }} className="mt-3 min-h-11 text-xs font-semibold text-emerald-300 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+            Limpar filtros
+          </button>
+        )}
+      </Card>
+
+      <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-amber-100">
+        <span className="font-semibold">Fonte exibida: banco seed local</span>
+        <span className="text-amber-100/75">· Dashboard ainda não agrega os Parquets reais; valores são campos genéricos e podem representar conceitos financeiros diferentes.</span>
+      </div>
 
       {/* KPI cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -347,8 +407,8 @@ export default function Dashboard() {
       {/* Gráficos principais */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <ChartCard
-          title="Top municípios por valor"
-          subtitle="Oito municípios com maior valor registrado (R$)"
+          title="Municípios por volume de registros"
+          subtitle="Municípios com mais documentos no recorte selecionado"
         >
           {topMunicipios.length === 0 ? (
             <p className="py-8 text-center text-sm text-slate-400">
@@ -359,7 +419,7 @@ export default function Dashboard() {
               <div
                 className="h-80"
                 role="img"
-                aria-label="Gráfico de barras dos oito municípios com maior valor registrado."
+                aria-label="Gráfico de barras dos municípios com mais registros."
               >
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart
@@ -392,10 +452,10 @@ export default function Dashboard() {
                     />
                     <Tooltip
                       contentStyle={tooltipStyle}
-                      formatter={(value) => [brl(Number(value ?? 0)), "Valor"]}
+                      formatter={(value) => [int(Number(value ?? 0)), "Registros"]}
                       cursor={{ fill: "#1e293b66" }}
                     />
-                    <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                    <Bar dataKey="records" radius={[0, 4, 4, 0]}>
                       {topMunicipios.map((_, i) => (
                         <Cell
                           key={i}
@@ -541,7 +601,7 @@ export default function Dashboard() {
                     className="w-40 shrink-0 truncate text-xs text-slate-300 sm:w-56"
                     title={t.type}
                   >
-                    {t.type}
+                    {documentLabel(t.type)}
                   </span>
                   <div
                     className="h-5 flex-1 overflow-hidden rounded bg-slate-800/70"
@@ -570,8 +630,7 @@ export default function Dashboard() {
       </ChartCard>
 
       <p className="text-right text-xs text-slate-400">
-        Fonte: DuckDB · {int(totals.records)} registros em {totals.tables}{" "}
-        bases
+        {int(totals.records)} registros no recorte · {totals.tables} bases
       </p>
     </div>
   );

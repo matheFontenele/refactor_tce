@@ -12,6 +12,11 @@ services:
       - MEMORY_LIMIT=1536
       - ENDPOINTS_FILE=/config/endpoints.json
       - MUNICIPIOS_FILE=/config/municipios.json
+      # Lakehouse TCE-CE: fonte principal, manifest-gated e somente leitura.
+      # A raiz é montada de ${LAKEHOUSE_SOURCE} (host) em /lakehouse (container).
+      - LAKEHOUSE_SOURCE=/lakehouse
+      - LAKEHOUSE_SCAN_TTL_SECONDS=${LAKEHOUSE_SCAN_TTL_SECONDS:-30}
+      # Prefixos ainda não publicados no lakehouse usam o dataset antigo abaixo.
       - PARQUET_DIR=/parquet
       - CACHE_PARQUET_DIR=/cache
       - TCE_FETCH_BUDGET_SECONDS=120
@@ -27,8 +32,12 @@ services:
       - ollama
     volumes:
       - ./data:/data:ro
-      # Dataset real do TCE (read-only). Defina PARQUET_SOURCE no .env.
-      # Default ./data = sem parquets → Pesquisa cai no seed automaticamente.
+      # Lakehouse TCE-CE (fonte principal) — leitura direta, nunca escrita.
+      # Defina LAKEHOUSE_SOURCE no .env com o caminho do host.
+      # Default ./data = sem bronze/ → modo legado/seed local.
+      - ${LAKEHOUSE_SOURCE:-./data}:/lakehouse:ro
+      # Dataset real antigo (read-only). Usado só como fallback de transição
+      # para prefixos que o lakehouse ainda não publica.
       - ${PARQUET_SOURCE:-./data}:/parquet:ro
       # Cache gravável: recortes baixados sob demanda da API TCE (Spec 2.1)
       - ./data/cache:/cache

@@ -48,9 +48,58 @@ docker compose up -d api frontend
 docker compose --profile streamlit up -d streamlit
 ```
 
-### Dataset real (parquet) — leitura lazy
+### Lakehouse TCE-CE — fonte principal (manifest-gated)
 
-A Pesquisa Interativa lê o dataset real do TCE direto dos parquets (zero-copy, lazy),
+O lakehouse produzido pelo pipeline `pipeline_tce` é a fonte principal da Pesquisa
+e do Assistente. Monte a raiz read-only e aponte `LAKEHOUSE_SOURCE` no `.env`:
+
+```dotenv
+LAKEHOUSE_SOURCE=/home/controle-interno/pipeline_tce/lakehouse
+```
+
+No container a raiz aparece em `/lakehouse` (variável `LAKEHOUSE_SOURCE=/lakehouse`).
+Sem a montagem (ou sem `bronze/`), o app usa o modo legado descrito abaixo.
+
+Layout e contrato do consumidor:
+
+```text
+lakehouse/bronze/<endpoint>/<ano>/<endpoint>_<ano>_<mes>_<municipio>.parquet
+lakehouse/bronze/<endpoint>/<ano>/<endpoint>_<ano>_<mes>_<municipio>.parquet.manifest.json
+```
+
+- só `bronze/**` é lido; `_staging/`, `*.tmp` e caminhos iniciados por `_`/`.` são ignorados;
+- o `.manifest.json` é o commit: o Parquet só é aberto se o manifesto existir;
+- antes de usar, validamos `content_sha256`, `row_count` e `columns` do manifesto;
+- falha de validação → arquivo pulado e nova tentativa numa execução seguinte
+  (pode ser substituição em andamento);
+- leitura sempre somente leitura; o app nunca escreve, move ou apaga na árvore;
+- atualidade vem de `content_sha256` + `created_at`, nunca de `mtime`;
+- não conectamos no Postgres `pipeline_state`, no banco do Airflow nem no volume antigo.
+
+Implementação: `src/api/lakehouse.py` (descoberta por `find`/walk de manifestos,
+cache de validação por `(path, content_sha256, size_bytes)`, cache curto da varredura).
+A Pesquisa e o Assistente consomem essa camada; não fazem glob direto em `bronze`.
+
+**Precedência:** se o endpoint já tem manifesto no lakehouse, só o lakehouse é usado
+(não misturamos com o dataset antigo/cache). Prefixos ainda não publicados lá caem
+no modo legado abaixo. Para endpoints do lakehouse o fetch sob demanda do TCE fica
+desligado — o lakehouse é autoritativo.
+
+Cobertura do piloto: `notas_empenho`, 2024, município `057`, meses `01` e `02`.
+Outros recortes retornam vazio legitimamente até o pipeline publicar.
+
+Verificação rápida no servidor:
+
+```bash
+find /home/controle-interno/pipeline_tce/lakehouse/bronze -name '*.manifest.json'
+curl -s -X POST http://localhost:9001/api/search \
+  -H 'Content-Type: application/json' \
+  -d '{"category":"notas_empenho","year_from":2024,"year_to":2024,"municipality":"057"}'
+```
+
+### Dataset real legado (parquet) — fallback de transição
+
+A Pesquisa ainda lê o dataset antigo para prefixos que o lakehouse não publica,
 com **pruning por nome de arquivo** (ano/município). Configure a fonte no `.env`:
 
 ```bash
