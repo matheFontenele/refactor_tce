@@ -320,8 +320,14 @@ class Lakehouse:
     # ---------------- API de consumo ----------------
 
     def has_prefix(self, prefix: str) -> bool:
-        """Existe manifesto commitado para o endpoint? (decide a precedência da fonte)"""
-        return any(m.endpoint == prefix for m in self.discover())
+        """Existe diretório do endpoint no bronze? (decide a precedência da fonte)
+
+        O caminho ``bronze/<endpoint>/`` publica o endpoint; não é preciso varrer
+        os manifestos de toda a árvore (828k arquivos) só para responder isso.
+        """
+        if not prefix or _is_skipped(prefix) or os.sep in prefix:
+            return False
+        return (self.bronze / prefix).is_dir()
 
     def files(
         self,
@@ -330,21 +336,52 @@ class Lakehouse:
         year_to: int,
         municipality: str = "all",
     ) -> list[str]:
-        """Parquets validados do recorte, ordenados e sem duplicatas."""
+        """Parquets validados do recorte, ordenados e sem duplicatas.
+
+        Lê apenas ``bronze/<prefix>/<ano>/`` dos anos pedidos: o layout do
+        bronze já indexa endpoint e ano, então varrer ``bronze/**`` inteiro
+        seria O(828k) manifestos por request. Cada manifesto lido continua
+        sendo o commit da partição (sha256/row_count/columns em ``_validate``).
+        """
+        base = self.bronze / prefix
+        if not base.is_dir():
+            return []
+
         code = None
         if municipality and str(municipality) != "all":
             code = str(municipality).zfill(3)
+        suffix = f"_{code}.parquet.manifest.json" if code is not None else ".manifest.json"
 
         out: set[str] = set()
-        for manifest in self.discover():
-            if manifest.endpoint != prefix:
+        try:
+            with os.scandir(base) as it:
+                year_entries = list(it)
+        except OSError:
+            return []
+        for year_entry in year_entries:
+            year = _clean_int(year_entry.name)
+            if year is None or not (year_from <= year <= year_to):
                 continue
-            if not (year_from <= manifest.year <= year_to):
+            if not year_entry.is_dir(follow_symlinks=False):
                 continue
-            if code is not None and manifest.municipality != code:
+            try:
+                entries = os.scandir(year_entry.path)
+            except OSError:
                 continue
-            if self._validate(manifest):
-                out.add(manifest.path)
+            with entries:
+                for entry in entries:
+                    name = entry.name
+                    if not name.endswith(suffix) or _is_skipped(name):
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    manifest = _parse_manifest(Path(entry.path), self.bronze)
+                    if manifest is None:
+                        continue
+                    if code is not None and manifest.municipality != code:
+                        continue
+                    if self._validate(manifest):
+                        out.add(manifest.path)
         return sorted(out)
 
     def partitions(self, prefix: Optional[str] = None) -> list[Partition]:
