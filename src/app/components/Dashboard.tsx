@@ -356,29 +356,29 @@ export default function Dashboard() {
       />
 
       <Card className="p-4 sm:p-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
+        <div className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-[minmax(12rem,0.7fr)_minmax(0,1.8fr)] xl:items-end">
+          <div className="min-w-0">
             <p className="text-sm font-semibold text-slate-100">Recorte da análise</p>
             <p className="mt-1 text-xs text-slate-400">Os indicadores e gráficos seguem os filtros selecionados.</p>
           </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <label className="grid gap-1 text-xs font-medium text-slate-300">
+          <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <label className="grid min-w-0 gap-1 text-xs font-medium text-slate-300">
               Exercício
-              <select aria-label="Filtrar por exercício" value={year} onChange={(e) => setYear(e.target.value)} className="min-h-11 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+              <select aria-label="Filtrar por exercício" value={year} onChange={(e) => setYear(e.target.value)} className="h-11 min-w-0 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
                 <option value="all">Todos os exercícios</option>
                 {options.by_year.map((row) => <option key={row.year} value={row.year}>{row.year}</option>)}
               </select>
             </label>
-            <label className="grid gap-1 text-xs font-medium text-slate-300">
+            <label className="grid min-w-0 gap-1 text-xs font-medium text-slate-300">
               Município
-              <select aria-label="Filtrar por município" value={municipality} onChange={(e) => setMunicipality(e.target.value)} className="min-h-11 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+              <select aria-label="Filtrar por município" value={municipality} onChange={(e) => setMunicipality(e.target.value)} className="h-11 min-w-0 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
                 <option value="all">Todos os municípios</option>
                 {options.by_municipality.map((row) => <option key={row.municipality} value={row.municipality}>{row.municipality}</option>)}
               </select>
             </label>
-            <label className="grid gap-1 text-xs font-medium text-slate-300">
+            <label className="grid min-w-0 gap-1 text-xs font-medium text-slate-300">
               Tipo de documento
-              <select aria-label="Filtrar por tipo de documento" value={category} onChange={(e) => setCategory(e.target.value)} className="min-h-11 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+              <select aria-label="Filtrar por tipo de documento" value={category} onChange={(e) => setCategory(e.target.value)} className="h-11 min-w-0 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
                 <option value="all">Todos os tipos</option>
                 {options.by_document_type.map((row) => <option key={row.type} value={row.type}>{documentLabel(row.type)}</option>)}
               </select>
